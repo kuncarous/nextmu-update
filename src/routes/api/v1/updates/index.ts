@@ -1,6 +1,5 @@
 import { getServersFast } from '~/services/api';
 import { getUpdateFiles, getVersion, getVersions } from '~/services/api';
-import { OperatingSystems, TextureFormat } from '~/shared';
 import { logger } from '~/logger';
 import { Request, Response, Router } from 'express';
 import { StatusCodes } from 'http-status-codes';

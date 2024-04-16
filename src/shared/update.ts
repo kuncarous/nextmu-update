@@ -19,25 +19,6 @@ export enum UpdatesCategories {
     iOS = 24,
 };
 
-export enum OperatingSystems {
-    Windows,
-    Linux,
-    MacOS,
-    WindowsMobile,
-    Android,
-    iOS,
-    Max = iOS,
-};
-
-export enum TextureFormat {
-    eUncompressed,
-    BC3,
-    BC7,
-    ETC2,
-    ASTC,
-    Max = ASTC,
-}
-
 export const PlatformLookup = [
     UpdatesCategories.Desktop,
     UpdatesCategories.Desktop,
@@ -82,12 +63,6 @@ export const UpdateTypeLookup = [
     UpdatesCategories.Android,
     UpdatesCategories.iOS,
 ];
-
-export enum VersionType {
-    Revision = 0,
-    Minor = 1,
-    Major = 2,
-};
 
 export enum VersionState {
     Pending = 0,

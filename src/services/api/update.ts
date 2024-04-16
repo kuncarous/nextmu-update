@@ -1,5 +1,5 @@
 import { logger } from "~/logger";
-import { OperatingSystemLookup, OperatingSystems, PlatformLookup, TextureFormat, TextureLookup, UpdatesCategories, VersionState, VersionType, updateCacheDuration } from "~/shared";
+import { OperatingSystemLookup, PlatformLookup, TextureLookup, UpdatesCategories, VersionState, updateCacheDuration } from "~/shared";
 import { getMongoClient } from "../mongodb/client";
 import { lockUpdateTransaction } from "../mongodb/update";
 import { IMDBVersion } from "../mongodb/schemas/updates/versions";
@@ -7,6 +7,7 @@ import moment from "moment";
 import { ObjectId } from "mongodb";
 import { IMDBUpdateFile } from "../mongodb/schemas/updates/files";
 import { client as redis } from "~/services/redis";
+import { OperatingSystems, TextureFormat, VersionType } from "~/types/api/v1";
 
 interface ICreateVersionResult {
     id?: string;

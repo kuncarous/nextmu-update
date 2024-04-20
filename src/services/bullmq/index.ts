@@ -4,13 +4,9 @@ import { ExpressAdapter } from '@bull-board/express';
 import { UpdatesQueue } from './updates';
 
 export const serverAdapter = new ExpressAdapter();
-export const bullBoard = createBullBoard(
-    {
-        queues: [
-            new BullMQAdapter(UpdatesQueue),
-        ],
-        serverAdapter,
-    }
-);
+export const bullBoard = createBullBoard({
+    queues: [new BullMQAdapter(UpdatesQueue)],
+    serverAdapter,
+});
 
 export * from './updates';

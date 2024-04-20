@@ -1,22 +1,22 @@
-import { MongoClient, ClientSession } from "mongodb";
+import { ClientSession, MongoClient } from 'mongodb';
 
 export const lockUpdateTransaction = async (
     client: MongoClient,
     session: ClientSession,
 ) => {
-    const lockColl = client.db("updates").collection("lock");
+    const lockColl = client.db('updates').collection('lock');
     await lockColl.findOneAndUpdate(
         {
-            "in_transaction": {
+            in_transaction: {
                 $exists: false,
             },
         },
         {
-            $set: { "in_transaction": true },
+            $set: { in_transaction: true },
         },
         {
             session,
             upsert: true,
-        }
+        },
     );
-}
+};

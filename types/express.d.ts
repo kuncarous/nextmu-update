@@ -1,4 +1,4 @@
-import oidc from "oauth4webapi";
+import oidc from 'oauth4webapi';
 
 declare global {
     namespace Express {

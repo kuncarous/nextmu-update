@@ -1,5 +1,5 @@
 export const UsernameLength = { min: 4, max: 16 };
-export const UsernameRegex = /^[a-zA-Z0-9_\-\.]{4,16}$/;
+export const UsernameRegex = /^[a-zA-Z0-9_\-.]{4,16}$/;
 
 export const EmailVerifyLapse = 5;
 

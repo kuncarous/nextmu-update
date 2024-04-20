@@ -1,5 +1,5 @@
-import dotenv from 'dotenv';
 import commandLineArgs from 'command-line-args';
+import dotenv from 'dotenv';
 
 if (!process.env.NODE_ENV) {
     // Setup command line options
@@ -18,5 +18,5 @@ if (!process.env.NODE_ENV) {
     });
     if (result.error) {
         throw result.error;
-    }    
+    }
 }

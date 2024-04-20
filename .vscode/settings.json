@@ -1,3 +1,11 @@
 {
-    "typescript.tsdk": "node_modules\\typescript\\lib"
+    "editor.codeActionsOnSave": {
+        "source.fixAll": "always"
+    },
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "editor.formatOnSave": true,
+    "files.autoSave": "afterDelay",
+    "typescript.tsdk": "node_modules\\typescript\\lib",
+    "prettier.tabWidth": 4,
+    "eslint.experimental.useFlatConfig": true
 }

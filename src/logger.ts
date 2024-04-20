@@ -19,11 +19,7 @@ const winstonLogger = createLogger({
  * For development, print to the console.
  */
 if (process.env.NODE_ENV === 'production') {
-
-    const fileFormat = format.combine(
-        format.timestamp(),
-        format.json(),
-    );
+    const fileFormat = format.combine(format.timestamp(), format.json());
     const errTransport = new File({
         filename: './logs/error.log',
         format: fileFormat,
@@ -35,9 +31,7 @@ if (process.env.NODE_ENV === 'production') {
     });
     winstonLogger.add(errTransport);
     winstonLogger.add(infoTransport);
-
 } else {
-
     const errorStackFormat = format((info) => {
         if (info.stack) {
             // tslint:disable-next-line:no-console

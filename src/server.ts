@@ -1,16 +1,16 @@
-import express, { RequestHandler } from 'express';
 import cookieParser from 'cookie-parser';
-import logger from 'morgan';
 import cors from 'cors';
-import BaseRouter from './routes';
+import express, { RequestHandler } from 'express';
+import logger from 'morgan';
 import { permissionErrorHandler } from '~/middlewares/auth';
+import BaseRouter from './routes';
 
 // Init express
 const app = express();
 
 // Add middleware/settings/routes to express.
 app.use(express.json());
-app.use(express.urlencoded({extended: true}));
+app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(cors());
 

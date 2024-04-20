@@ -1,2 +1,2 @@
-export * from './update';
 export * from './servers';
+export * from './update';

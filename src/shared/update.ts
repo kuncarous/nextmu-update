@@ -17,7 +17,7 @@ export enum UpdatesCategories {
     MacOS = 22,
     Android = 23,
     iOS = 24,
-};
+}
 
 export const PlatformLookup = [
     UpdatesCategories.Desktop,
@@ -64,11 +64,6 @@ export const UpdateTypeLookup = [
     UpdatesCategories.iOS,
 ];
 
-export enum VersionState {
-    Pending = 0,
-    Ready = 1,
-};
-
 export const incomingUpdatesPath = './tmp/incoming/';
 export const processedUpdatesPath = './tmp/processed/';
 export const incomingFolders = [
@@ -76,7 +71,7 @@ export const incomingFolders = [
 
     'desktop',
     'mobile',
-    
+
     'uncompressed',
     'bc3',
     'bc7',

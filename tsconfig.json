@@ -1,8 +1,4 @@
 {
-  "ts-node": {
-    "esm": true,
-    "files": true
-  },
   "compilerOptions": {
     /* Visit https://aka.ms/tsconfig to read more about this file */
 
@@ -115,6 +111,7 @@
     "skipLibCheck": true                                 /* Skip type checking all .d.ts files. */
   },
   "include": [
+    "proto/**/*.ts",
     "src/**/*.ts",
     "types/**/*.d.ts"
   ],

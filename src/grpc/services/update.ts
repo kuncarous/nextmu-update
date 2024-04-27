@@ -18,9 +18,7 @@ import { getVersionAsString, toTimestamp } from '~/utils';
 import { retrieveAuthMetadata, validateRoles } from '../middlewares/auth';
 import { handlegRpcError } from '../utils/error';
 
-const updateDefinition = protoLoader.loadSync(
-    '../../../proto/models/update.proto',
-);
+const updateDefinition = protoLoader.loadSync('proto/models/update.proto');
 export const updateProto = grpc.loadPackageDefinition(
     updateDefinition,
 ) as unknown as ProtoGrpcType;

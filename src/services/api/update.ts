@@ -1,8 +1,9 @@
 import { StatusCodes } from 'http-status-codes';
 import moment from 'moment';
-import { ObjectId } from 'mongodb';
+import { ObjectId, WithId } from 'mongodb';
 import { logger } from '~/logger';
-import { VersionState, VersionType } from '~/proto/update_pb';
+import { VersionState } from '~/proto/nextmu/v1/VersionState';
+import { VersionType } from '~/proto/nextmu/v1/VersionType';
 import { client as redis } from '~/services/redis';
 import {
     OperatingSystemLookup,
@@ -12,24 +13,16 @@ import {
     updateCacheDuration,
 } from '~/shared';
 import { ResponseError } from '~/shared/error';
-import {
+import type {
     IRetrieveUpdateResponse,
     OperatingSystems,
     TextureFormat,
 } from '~/types/api/v1';
 import { UpdatesQueue } from '../bullmq';
 import { getMongoClient } from '../mongodb/client';
-import { IMDBUpdateFile } from '../mongodb/schemas/updates/files';
-import { IMDBVersion } from '../mongodb/schemas/updates/versions';
+import type { IMDBUpdateFile } from '../mongodb/schemas/updates/files';
+import type { IMDBVersion } from '../mongodb/schemas/updates/versions';
 import { lockUpdateTransaction } from '../mongodb/update';
-
-interface IVersion {
-    major: number;
-    minor: number;
-    revision: number;
-}
-const getVersionAsString = (version: IVersion) =>
-    `${version.major}.${version.minor}.${version.revision}`;
 
 export const createVersion = async (type: VersionType, description: string) => {
     const client = await getMongoClient();
@@ -100,8 +93,8 @@ export const createVersion = async (type: VersionType, description: string) => {
         await session.commitTransaction();
 
         return {
-            id: insertedVersion.insertedId.id,
-            version: getVersionAsString(versionToInsert.version),
+            id: insertedVersion.insertedId,
+            version: versionToInsert.version,
         };
     } catch (error) {
         await session.abortTransaction();
@@ -161,7 +154,7 @@ export const getVersions = async (offset: number, count: number) => {
     const versionsResult = await versionsColl
         .aggregate<{
             count: number;
-            data: IMDBVersion[];
+            data: (WithId<IMDBVersion> & { filesCount: number })[];
         }>([
             {
                 $facet: {
@@ -193,10 +186,10 @@ export const getVersions = async (offset: number, count: number) => {
     if (deferredData == null) return { data: [], count: 0 };
 
     const versionsMap = new Map(
-        deferredData.data.map((version, index) => [
-            version._id!.toHexString(),
-            index,
-        ]),
+        deferredData.data.map((version, index) => {
+            version.filesCount ??= 0;
+            return [version._id!.toHexString(), index];
+        }),
     );
     const filesCount = await filesColl
         .aggregate<{
@@ -226,18 +219,7 @@ export const getVersions = async (offset: number, count: number) => {
             f.filesCount;
     });
 
-    return {
-        data: deferredData.data.map((v) => ({
-            id: v._id!.id,
-            version: getVersionAsString(v.version),
-            description: v.description,
-            state: v.state,
-            filesCount: v.filesCount ?? 0,
-            createdAt: v.createdAt,
-            updatedAt: v.updatedAt,
-        })),
-        count: deferredData.count,
-    };
+    return deferredData;
 };
 
 export const getVersion = async (versionId: ObjectId) => {
@@ -252,8 +234,8 @@ export const getVersion = async (versionId: ObjectId) => {
 
     const versionsColl = client
         .db('updates')
-        .collection<IMDBVersion>('versions');
-    const filesColl = client.db('updates').collection<IMDBVersion>('files');
+        .collection<IMDBVersion & { filesCount: number }>('versions');
+    const filesColl = client.db('updates').collection<IMDBUpdateFile>('files');
 
     const version = await versionsColl.findOne({
         _id: versionId,
@@ -266,7 +248,7 @@ export const getVersion = async (versionId: ObjectId) => {
         );
     }
 
-    const filesCount = await filesColl
+    const filesResult = await filesColl
         .aggregate<{
             _id: ObjectId;
             filesCount: number;
@@ -289,19 +271,12 @@ export const getVersion = async (versionId: ObjectId) => {
         ])
         .toArray();
 
-    filesCount.forEach((f) => {
-        version.filesCount = f.filesCount;
-    });
+    version.filesCount ??= 0;
+    if (filesResult.length > 0) {
+        version.filesCount = filesResult[0].filesCount;
+    }
 
-    return {
-        id: version._id!.id,
-        version: getVersionAsString(version.version),
-        description: version.description,
-        state: version.state,
-        filesCount: version.filesCount ?? 0,
-        createdAt: version.createdAt,
-        updatedAt: version.updatedAt,
-    };
+    return version;
 };
 
 export const processVersion = async (id: string) => {
@@ -401,13 +376,12 @@ export const getUpdateFiles = async (
         if (updateData != null) return JSON.parse(updateData);
 
         interface IUpdateFile {
-            version: IMDBVersion;
+            version: WithId<IMDBVersion>;
             file: IMDBUpdateFile;
         }
 
         const versionsMap = new Map(
             versions.map((version) => {
-                version.id = version._id!.toHexString().toUpperCase();
                 return [version._id!.toHexString(), version];
             }),
         );
@@ -466,7 +440,7 @@ export const getUpdateFiles = async (
         const result = {
             version: `${lastVersion.version.major}.${lastVersion.version.minor}.${lastVersion.version.revision}`,
             files: Array.from(filesMap.values()).map((f) => ({
-                UrlPath: f.version.id!,
+                UrlPath: f.version._id.toHexString().toUpperCase(),
                 LocalPath: f.file.localPath,
                 Filename: f.file.fileName,
                 Extension: f.file.extension,

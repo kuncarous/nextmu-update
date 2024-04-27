@@ -1,28 +1,11 @@
-import {
-    ServiceError,
-    UntypedHandleCall,
-    handleUnaryCall,
-    status,
-} from '@grpc/grpc-js';
-import * as google_protobuf_empty_pb from 'google-protobuf/google/protobuf/empty_pb';
-import { Empty } from 'google-protobuf/google/protobuf/empty_pb';
-import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
-import { ObjectId } from 'mongodb';
+import * as grpc from '@grpc/grpc-js';
+import * as protoLoader from '@grpc/proto-loader';
+import { ObjectId, WithId } from 'mongodb';
 import { z } from 'zod';
-import { IUpdateServiceServer } from '~/proto/update_grpc_pb';
-import {
-    CreateVersionRequest,
-    CreateVersionResponse,
-    EditVersionRequest,
-    FetchVersionRequest,
-    FetchVersionResponse,
-    ListVersionsRequest,
-    ListVersionsResponse,
-    ProcessVersionRequest,
-    Version,
-    VersionState,
-    VersionType,
-} from '~/proto/update_pb';
+import type { UpdateServiceHandlers } from '~/proto/nextmu/v1/UpdateService';
+import type { Version } from '~/proto/nextmu/v1/Version';
+import { VersionType } from '~/proto/nextmu/v1/VersionType';
+import type { ProtoGrpcType } from '~/proto/update';
 import {
     createVersion,
     editVersion,
@@ -30,31 +13,17 @@ import {
     getVersions,
     processVersion,
 } from '~/services/api';
+import { IMDBVersion } from '~/services/mongodb/schemas/updates/versions';
+import { getVersionAsString, toTimestamp } from '~/utils';
 import { retrieveAuthMetadata, validateRoles } from '../middlewares/auth';
 import { handlegRpcError } from '../utils/error';
 
-const ZVersion = z.object({
-    id: z.instanceof(Uint8Array),
-    version: z.string(),
-    description: z.string(),
-    state: z.nativeEnum(VersionState),
-    filesCount: z.coerce.number().int().min(0),
-    createdAt: z.coerce.date(),
-    updatedAt: z.coerce.date(),
-});
-type IVersion = z.infer<typeof ZVersion>;
-
-function CreateVersionFromObject(v: IVersion) {
-    const result = new Version();
-    result.setId(v.id);
-    result.setVersion(v.version);
-    result.setDescription(v.description);
-    result.setState(v.state);
-    result.setFilesCount(v.filesCount);
-    result.setCreatedAt(Timestamp.fromDate(v.createdAt));
-    result.setUpdatedAt(Timestamp.fromDate(v.updatedAt));
-    return result;
-}
+const updateDefinition = protoLoader.loadSync(
+    '../../../proto/models/update.proto',
+);
+export const updateProto = grpc.loadPackageDefinition(
+    updateDefinition,
+) as unknown as ProtoGrpcType;
 
 const ZListVersionsRequest = z.object({
     page: z.number().int().min(0),
@@ -63,7 +32,7 @@ const ZListVersionsRequest = z.object({
 
 const ZFetchVersionRequest = z.object({
     id: z
-        .string()
+        .instanceof(Buffer)
         .refine((v) => ObjectId.isValid(v))
         .transform((v) => new ObjectId(v)),
 });
@@ -79,7 +48,7 @@ const ZCreateVersionRequest = z.object({
 
 const ZEditVersionRequest = z.object({
     id: z
-        .string()
+        .instanceof(Buffer)
         .refine((v) => ObjectId.isValid(v))
         .transform((v) => new ObjectId(v)),
     description: z.string().min(1).max(256),
@@ -87,7 +56,7 @@ const ZEditVersionRequest = z.object({
 
 const ZProcessVersionRequest = z.object({
     id: z
-        .string()
+        .instanceof(Buffer)
         .refine((v) => ObjectId.isValid(v))
         .transform((v) => new ObjectId(v)),
 });
@@ -95,112 +64,47 @@ const ZProcessVersionRequest = z.object({
 const ViewRoleValidator = validateRoles(['update:view']);
 const EditRoleValidator = validateRoles(['update:edit']);
 
-class UpdateServiceServer implements IUpdateServiceServer {
-    // eslint-disable-next-line no-undef
-    [name: string]: UntypedHandleCall;
+const parseVersion = (
+    version: WithId<IMDBVersion> & { filesCount: number },
+): Version => {
+    return {
+        id: version._id.id,
+        version: getVersionAsString(version.version),
+        description: version.description,
+        state: version.state,
+        filesCount: version.filesCount,
+        createdAt: toTimestamp(version.createdAt),
+        updatedAt: toTimestamp(version.updatedAt),
+    };
+};
 
-    listVersions: handleUnaryCall<ListVersionsRequest, ListVersionsResponse> =
-        async (call, callback) => {
-            const [auth, error] = await retrieveAuthMetadata(call);
-            if (error !== null) return callback(error);
-
-            const roles_error = await ViewRoleValidator(auth!);
-            if (error != null) return callback(roles_error);
-
-            const parsed = ZListVersionsRequest.safeParse(
-                call.request.toObject(),
-            );
-            if (parsed.success == false) {
-                return call.emit<ServiceError>('error', {
-                    code: status.INVALID_ARGUMENT,
-                    details: parsed.error.format()._errors.join('\n'),
-                });
-            }
-
-            try {
-                const { page, size } = parsed.data;
-                const result = await getVersions(page * size, size);
-
-                const response = new ListVersionsResponse();
-                response.setAvailableCount(result.count);
-                response.setVersionsList(
-                    result.data.map((v) => CreateVersionFromObject(v)),
-                );
-
-                callback(null, response);
-            } catch (error) {
-                handlegRpcError(
-                    'UpdateServiceServer.listVersions',
-                    call,
-                    callback,
-                    error,
-                );
-            }
-        };
-
-    fetchVersion: handleUnaryCall<FetchVersionRequest, FetchVersionResponse> =
-        async (call, callback) => {
-            const [auth, error] = await retrieveAuthMetadata(call);
-            if (error !== null) return callback(error);
-
-            const roles_error = await ViewRoleValidator(auth!);
-            if (error != null) return callback(roles_error);
-
-            const parsed = ZFetchVersionRequest.safeParse(
-                call.request.toObject(),
-            );
-            if (parsed.success == false) {
-                return call.emit<ServiceError>('error', {
-                    code: status.INVALID_ARGUMENT,
-                    details: parsed.error.format()._errors.join('\n'),
-                });
-            }
-
-            try {
-                const { id } = parsed.data;
-                const result = await getVersion(id);
-
-                const response = new FetchVersionResponse();
-                response.setVersion(CreateVersionFromObject(result));
-
-                callback(null, response);
-            } catch (error) {
-                handlegRpcError(
-                    'UpdateServiceServer.fetchVersion',
-                    call,
-                    callback,
-                    error,
-                );
-            }
-        };
-
-    createVersion: handleUnaryCall<
-        CreateVersionRequest,
-        CreateVersionResponse
-    > = async (call, callback) => {
+export const updateServiceServer: UpdateServiceHandlers = {
+    CreateVersion: async (call, callback) => {
         const [auth, error] = await retrieveAuthMetadata(call);
         if (error !== null) return callback(error);
 
         const roles_error = await EditRoleValidator(auth!);
         if (error != null) return callback(roles_error);
 
-        const parsed = ZCreateVersionRequest.safeParse(call.request.toObject());
+        const parsed = ZCreateVersionRequest.safeParse(call.request);
         if (parsed.success == false) {
-            return call.emit<ServiceError>('error', {
-                code: status.INVALID_ARGUMENT,
+            return call.emit<grpc.ServiceError>('error', {
+                code: grpc.status.INVALID_ARGUMENT,
                 details: parsed.error.format()._errors.join('\n'),
             });
         }
 
         try {
             const { type, description } = parsed.data;
-            const result = await createVersion(type, description);
+            const result = await createVersion(
+                type as VersionType,
+                description,
+            );
 
-            const response = new CreateVersionResponse();
-            response.setId(result.id);
-            response.setVersion(result.version);
-
-            callback(null, response);
+            callback(null, {
+                id: result.id.id,
+                version: getVersionAsString(result.version),
+            });
         } catch (error) {
             handlegRpcError(
                 'UpdateServiceServer.createVersion',
@@ -209,22 +113,18 @@ class UpdateServiceServer implements IUpdateServiceServer {
                 error,
             );
         }
-    };
-
-    editVersion: handleUnaryCall<EditVersionRequest, Empty> = async (
-        call,
-        callback,
-    ) => {
+    },
+    EditVersion: async (call, callback) => {
         const [auth, error] = await retrieveAuthMetadata(call);
         if (error !== null) return callback(error);
 
         const roles_error = await EditRoleValidator(auth!);
         if (error != null) return callback(roles_error);
 
-        const parsed = ZEditVersionRequest.safeParse(call.request.toObject());
+        const parsed = ZEditVersionRequest.safeParse(call.request);
         if (parsed.success == false) {
-            return call.emit<ServiceError>('error', {
-                code: status.INVALID_ARGUMENT,
+            return call.emit<grpc.ServiceError>('error', {
+                code: grpc.status.INVALID_ARGUMENT,
                 details: parsed.error.format()._errors.join('\n'),
             });
         }
@@ -232,7 +132,7 @@ class UpdateServiceServer implements IUpdateServiceServer {
         try {
             const { id, description } = parsed.data;
             await editVersion(id, description);
-            callback(null, new google_protobuf_empty_pb.Empty());
+            callback(null, {});
         } catch (error) {
             handlegRpcError(
                 'UpdateServiceServer.editVersion',
@@ -241,24 +141,81 @@ class UpdateServiceServer implements IUpdateServiceServer {
                 error,
             );
         }
-    };
+    },
+    FetchVersion: async (call, callback) => {
+        const [auth, error] = await retrieveAuthMetadata(call);
+        if (error !== null) return callback(error);
 
-    processVersion: handleUnaryCall<ProcessVersionRequest, Empty> = async (
-        call,
-        callback,
-    ) => {
+        const roles_error = await ViewRoleValidator(auth!);
+        if (error != null) return callback(roles_error);
+
+        const parsed = ZFetchVersionRequest.safeParse(call.request);
+        if (parsed.success == false) {
+            return call.emit<grpc.ServiceError>('error', {
+                code: grpc.status.INVALID_ARGUMENT,
+                details: parsed.error.format()._errors.join('\n'),
+            });
+        }
+
+        try {
+            const { id } = parsed.data;
+            const result = await getVersion(id);
+
+            callback(null, {
+                version: parseVersion(result),
+            });
+        } catch (error) {
+            handlegRpcError(
+                'UpdateServiceServer.fetchVersion',
+                call,
+                callback,
+                error,
+            );
+        }
+    },
+    ListVersions: async (call, callback) => {
+        const [auth, error] = await retrieveAuthMetadata(call);
+        if (error !== null) return callback(error);
+
+        const roles_error = await ViewRoleValidator(auth!);
+        if (error != null) return callback(roles_error);
+
+        const parsed = ZListVersionsRequest.safeParse(call.request);
+        if (parsed.success == false) {
+            return call.emit<grpc.ServiceError>('error', {
+                code: grpc.status.INVALID_ARGUMENT,
+                details: parsed.error.format()._errors.join('\n'),
+            });
+        }
+
+        try {
+            const { page, size } = parsed.data;
+            const result = await getVersions(page * size, size);
+
+            callback(null, {
+                availableCount: result.count,
+                versions: result.data.map((v) => parseVersion(v)),
+            });
+        } catch (error) {
+            handlegRpcError(
+                'UpdateServiceServer.listVersions',
+                call,
+                callback,
+                error,
+            );
+        }
+    },
+    ProcessVersion: async (call, callback) => {
         const [auth, error] = await retrieveAuthMetadata(call);
         if (error !== null) return callback(error);
 
         const roles_error = await EditRoleValidator(auth!);
         if (error != null) return callback(roles_error);
 
-        const parsed = ZProcessVersionRequest.safeParse(
-            call.request.toObject(),
-        );
+        const parsed = ZProcessVersionRequest.safeParse(call.request);
         if (parsed.success == false) {
-            return call.emit<ServiceError>('error', {
-                code: status.INVALID_ARGUMENT,
+            return call.emit<grpc.ServiceError>('error', {
+                code: grpc.status.INVALID_ARGUMENT,
                 details: parsed.error.format()._errors.join('\n'),
             });
         }
@@ -266,7 +223,7 @@ class UpdateServiceServer implements IUpdateServiceServer {
         try {
             const { id } = parsed.data;
             await processVersion(id.toHexString());
-            callback(null, new google_protobuf_empty_pb.Empty());
+            callback(null, {});
         } catch (error) {
             handlegRpcError(
                 'UpdateServiceServer.processVersion',
@@ -275,7 +232,5 @@ class UpdateServiceServer implements IUpdateServiceServer {
                 error,
             );
         }
-    };
-}
-
-export { IUpdateServiceServer, UpdateServiceServer };
+    },
+};

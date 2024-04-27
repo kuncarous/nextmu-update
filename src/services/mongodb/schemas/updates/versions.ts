@@ -1,18 +1,14 @@
-import { ObjectId } from 'mongodb';
-import { VersionState } from '~/proto/update_pb';
+import { VersionState } from '~/proto/nextmu/v1/VersionState';
 
+export interface IVersion {
+    major: number;
+    minor: number;
+    revision: number;
+}
 export interface IMDBVersion {
-    _id?: ObjectId;
-    id?: string;
-
-    version: {
-        major: number;
-        minor: number;
-        revision: number;
-    };
+    version: IVersion;
     description: string;
     state: VersionState;
-    filesCount?: number;
 
     createdAt: Date;
     updatedAt: Date;

@@ -1,8 +1,6 @@
 import { ObjectId } from 'mongodb';
 
 export interface IMDBUpdateFile {
-    _id?: ObjectId;
-
     versionId: ObjectId;
     category: number;
 

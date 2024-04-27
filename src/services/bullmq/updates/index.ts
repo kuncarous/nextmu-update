@@ -10,7 +10,6 @@ import path, { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { v4 as uuidv4 } from 'uuid-mongodb';
 import zlib from 'zlib';
-import { VersionState } from '~/proto/update_pb';
 import { getMongoClient } from '~/services/mongodb/client';
 import { IMDBUpdateFile } from '~/services/mongodb/schemas/updates/files';
 import { IMDBVersion } from '~/services/mongodb/schemas/updates/versions';
@@ -23,6 +22,7 @@ import {
 } from '~/shared/update';
 import { RedisConnection } from '../../redis';
 import { UpdateJobData } from './types';
+import { VersionState } from '~/proto/nextmu/v1/VersionState';
 
 export const UpdatesQueueName =
     process.env.UPDATES_QUEUE_NAME ?? 'updatesQueueDev';

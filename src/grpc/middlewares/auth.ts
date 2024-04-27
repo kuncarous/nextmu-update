@@ -1,5 +1,5 @@
 import { ServerErrorResponse, ServerUnaryCall, status } from '@grpc/grpc-js';
-import oidc from 'oauth4webapi';
+import * as oidc from 'oauth4webapi';
 import {
     authProvider,
     getApiAuthClient,
@@ -135,7 +135,7 @@ export const validateRoles = (roles: string[]): ValidateRolesFunction => {
                         'urn:zitadel:iam:org:project:roles'
                     ] as oidc.JsonObject,
                 );
-                for (const role in roles) {
+                for (const role of roles) {
                     if (userRoles.includes(role) == true) continue;
                     return {
                         code: status.PERMISSION_DENIED,

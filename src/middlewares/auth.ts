@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import StatusCodes from 'http-status-codes';
-import oidc from 'oauth4webapi';
+import * as oidc from 'oauth4webapi';
 
 export const authProvider = process.env.OPENID_AUTH_PROVIDER || 'zitadel';
 
@@ -169,7 +169,7 @@ export const requireRoles = (roles: string[]) => {
                         'urn:zitadel:iam:org:project:roles'
                     ] as oidc.JsonObject,
                 );
-                for (const role in roles) {
+                for (const role of roles) {
                     if (!userRoles.includes(role))
                         return next(PermissionDeniedError);
                 }

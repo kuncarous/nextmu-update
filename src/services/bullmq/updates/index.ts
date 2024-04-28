@@ -10,6 +10,7 @@ import path, { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { v4 as uuidv4 } from 'uuid-mongodb';
 import zlib from 'zlib';
+import { VersionState } from '~/proto/nextmu/v1/VersionState';
 import { getMongoClient } from '~/services/mongodb/client';
 import { IMDBUpdateFile } from '~/services/mongodb/schemas/updates/files';
 import { IMDBVersion } from '~/services/mongodb/schemas/updates/versions';
@@ -22,7 +23,6 @@ import {
 } from '~/shared/update';
 import { RedisConnection } from '../../redis';
 import { UpdateJobData } from './types';
-import { VersionState } from '~/proto/nextmu/v1/VersionState';
 
 export const UpdatesQueueName =
     process.env.UPDATES_QUEUE_NAME ?? 'updatesQueueDev';
@@ -38,7 +38,6 @@ const SourceLocalStorageDir =
     process.env.UPDATE_SOURCE_DIRECTORY || '../updates-in';
 const OutputLocalStorageDir =
     process.env.UPDATE_OUTPUT_DIRECTORY || '../updates-out';
-const UpdatePrefixDir = process.env.UPDATE_PREFIX_DIR || '';
 
 const fsReadFileAsync = promisify(fs.readFile);
 const fsWriteFileAsync = promisify(fs.writeFile);
@@ -257,11 +256,7 @@ const processUpdateJob = async (job: BullMQ.Job<UpdateJobData>) => {
         reportProcessFiles(job, processedCount, filesCount, processProgress);
 
         if (UseOutputLocalStorage) {
-            const outputDir = resolve(
-                OutputLocalStorageDir,
-                UpdatePrefixDir,
-                uploadPath,
-            );
+            const outputDir = resolve(OutputLocalStorageDir, uploadPath);
             await fsAsync.rename(processedPath, outputDir);
         } else {
             throw new Error(`not implemented yet`);

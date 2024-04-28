@@ -34,7 +34,7 @@ const ZListVersionsRequest = z.object({
 
 const ZFetchVersionRequest = z.object({
     id: z
-        .instanceof(Buffer)
+        .string()
         .refine((v) => ObjectId.isValid(v))
         .transform((v) => new ObjectId(v)),
 });
@@ -50,7 +50,7 @@ const ZCreateVersionRequest = z.object({
 
 const ZEditVersionRequest = z.object({
     id: z
-        .instanceof(Buffer)
+        .string()
         .refine((v) => ObjectId.isValid(v))
         .transform((v) => new ObjectId(v)),
     description: z.string().min(1).max(256),
@@ -58,7 +58,7 @@ const ZEditVersionRequest = z.object({
 
 const ZProcessVersionRequest = z.object({
     id: z
-        .instanceof(Buffer)
+        .string()
         .refine((v) => ObjectId.isValid(v))
         .transform((v) => new ObjectId(v)),
 });
@@ -70,7 +70,7 @@ const parseVersion = (
     version: WithId<IMDBVersion> & { filesCount: number },
 ): Version => {
     return {
-        id: version._id.id,
+        id: version._id.toHexString(),
         version: getVersionAsString(version.version),
         description: version.description,
         state: version.state,
@@ -104,7 +104,7 @@ export const updateServiceServer: UpdateServiceHandlers = {
             );
 
             callback(null, {
-                id: result.id.id,
+                id: result.id.toHexString(),
                 version: getVersionAsString(result.version),
             });
         } catch (error) {

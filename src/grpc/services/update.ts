@@ -16,9 +16,13 @@ import {
 import { IMDBVersion } from '~/services/mongodb/schemas/updates/versions';
 import { getVersionAsString, toTimestamp } from '~/utils';
 import { retrieveAuthMetadata, validateRoles } from '../middlewares/auth';
+import { defaultProtoLoaderConfig } from '../utils/config';
 import { handlegRpcError } from '../utils/error';
 
-const updateDefinition = protoLoader.loadSync('proto/models/update.proto');
+const updateDefinition = protoLoader.loadSync(
+    'proto/models/update.proto',
+    defaultProtoLoaderConfig,
+);
 export const updateProto = grpc.loadPackageDefinition(
     updateDefinition,
 ) as unknown as ProtoGrpcType;

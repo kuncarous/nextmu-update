@@ -2,46 +2,57 @@ import { AwsCrc32 } from '@aws-crypto/crc32';
 import { ppath } from '@yarnpkg/fslib';
 import { ZipFS } from '@yarnpkg/libzip';
 import * as BullMQ from 'bullmq';
-import fs, { promises as fsAsync } from 'fs';
 import fsExtra from 'fs-extra';
 import moment from 'moment';
 import { ObjectId } from 'mongodb';
+import fs, {
+    createReadStream,
+    createWriteStream,
+    promises as fsAsync,
+} from 'node:fs';
+import { mkdir, stat } from 'node:fs/promises';
 import path, { resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { v4 as uuidv4 } from 'uuid-mongodb';
 import zlib from 'zlib';
 import { VersionState } from '~/proto/nextmu/v1/VersionState';
 import { getMongoClient } from '~/services/mongodb/client';
 import { IMDBUpdateFile } from '~/services/mongodb/schemas/updates/files';
+import { IMDBUpload } from '~/services/mongodb/schemas/updates/uploads';
 import { IMDBVersion } from '~/services/mongodb/schemas/updates/versions';
+import {
+    deleteFolder,
+    downloadFile,
+    downloadFolder,
+    uploadFile,
+    uploadFolder,
+} from '~/services/storage';
+import { StorageType } from '~/services/storage/enums';
 import { fixedProgress } from '~/shared';
 import {
+    UpdateTypeLookup,
     incomingFolders,
     incomingUpdatesPath,
     processedUpdatesPath,
-    UpdateTypeLookup,
 } from '~/shared/update';
+import {
+    FileInfo,
+    enumerateFiles,
+    getInputFolder,
+    getUploadFile,
+} from '~/utils';
 import { RedisConnection } from '../../redis';
-import { UpdateJobData } from './types';
+import {
+    IProcessPublishVersionJobData,
+    IProcessUploadVersionJobData,
+    UpdateJobData,
+    UpdateServiceJobType,
+} from './types';
 
 export const UpdatesQueueName =
     process.env.UPDATES_QUEUE_NAME ?? 'updatesQueueDev';
 export const UpdatesQueue = new BullMQ.Queue<UpdateJobData>(UpdatesQueueName, {
     connection: RedisConnection,
 });
-
-const UseSourceLocalStorage =
-    (process.env.UPDATE_SOURCE_PROVIDER || 'local') == 'local';
-const UseOutputLocalStorage =
-    (process.env.UPDATE_OUTPUT_PROVIDER || 'local') == 'local';
-const SourceLocalStorageDir =
-    process.env.UPDATE_SOURCE_DIRECTORY || '../updates-in';
-const OutputLocalStorageDir =
-    process.env.UPDATE_OUTPUT_DIRECTORY || '../updates-out';
-
-const fsReadFileAsync = promisify(fs.readFile);
-const fsWriteFileAsync = promisify(fs.writeFile);
-const fsReaddirAsync = promisify(fs.readdir);
 
 const zlibDeflateAsync = (buffer: zlib.InputType): Promise<Buffer> => {
     return new Promise<Buffer>((resolve, reject) => {
@@ -72,9 +83,9 @@ const deleteDirectory = async (path: string) => {
     }
 };
 
-interface IFileInfo {
+interface FileInfoExt extends FileInfo {
     // Before process
-    localPath: string;
+    path: string;
 
     // After process info
     filename?: string;
@@ -83,35 +94,6 @@ interface IFileInfo {
     fileSize?: number;
     packedSize?: number;
 }
-
-const enumerateFiles = async (
-    path: string,
-    relativePath: string = '',
-): Promise<IFileInfo[]> => {
-    const files: IFileInfo[] = [];
-    if (!fs.existsSync(path)) return files;
-
-    const dirents = await fsReaddirAsync(path, { withFileTypes: true });
-    for (const dirent of dirents) {
-        if (dirent.isFile()) {
-            files.push({
-                localPath: relativePath + dirent.name,
-            });
-        }
-    }
-    for (const dirent of dirents) {
-        if (dirent.isDirectory()) {
-            files.push(
-                ...(await enumerateFiles(
-                    path + dirent.name + '/',
-                    relativePath + dirent.name + '/',
-                )),
-            );
-        }
-    }
-
-    return files;
-};
 
 async function makeDirectory(directory: string, recursive: boolean = false) {
     try {
@@ -153,44 +135,173 @@ const reportProcessFiles = (
 ) => {
     job.updateProgress(
         fixedProgress(
-            progress[0] + progress[1] * (processedCount / filesCount),
+            progress[0] +
+                (progress[1] - progress[0]) * (processedCount / filesCount),
         ),
     );
 };
 
-const processUpdateJob = async (job: BullMQ.Job<UpdateJobData>) => {
-    const { versionId } = job.data;
-    const uploadPath = versionId.toUpperCase() + '/';
-    const incomingPath = incomingUpdatesPath + uploadPath;
-    const processedPath = processedUpdatesPath + uploadPath;
+const getJobProgress = (low: number, high: number, progress: number) =>
+    low + (high - low) * progress;
+
+const processUploadVersion = async (
+    job: BullMQ.Job<UpdateJobData>,
+    data: IProcessUploadVersionJobData,
+) => {
+    const { versionId, uploadId, concurrentId } = data;
+
+    const client = await getMongoClient();
+    if (!client) {
+        throw new Error(`getMongoClient failed`);
+    }
+
+    const uploadsColl = client.db('updates').collection<IMDBUpload>('uploads');
+
+    const upload = await uploadsColl.findOne({
+        _id: new ObjectId(uploadId),
+        concurrentId: new ObjectId(concurrentId),
+    });
+    if (upload == null || upload.versionId.equals(versionId) == false) {
+        return;
+    }
+
+    const uploadPath = `uploads/${versionId.toUpperCase()}-${uploadId.toUpperCase()}/`;
+    const incomingPath = path.join(incomingUpdatesPath, uploadPath);
+    const processedPath = path.join(processedUpdatesPath, uploadPath);
 
     await deleteDirectory(incomingPath);
     await deleteDirectory(processedPath);
-    await fsExtra.ensureDir(processedPath);
+    await mkdir(incomingPath, { recursive: true });
+    await mkdir(processedPath, { recursive: true });
 
     try {
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const downloadProgress = [0, 50];
+        const processProgress = [50, 90];
+        const uploadProgress = [90, 100];
+
+        const filesPrefix = getInputFolder(versionId, uploadId);
+        await downloadFolder(StorageType.Input, filesPrefix, incomingPath, {
+            onProgress: (progress) =>
+                job.updateProgress(
+                    getJobProgress(
+                        downloadProgress[0],
+                        downloadProgress[1],
+                        progress,
+                    ),
+                ),
+        });
+
+        const files: FileInfoExt[] = await enumerateFiles(incomingPath);
+        for (const file of files) {
+            const stats = await stat(file.path);
+            file.fileSize = stats.size;
+        }
+
+        const readSize = files.reduce(
+            (previousValue, currentValue) =>
+                previousValue + currentValue.fileSize!,
+            0,
+        );
+        let writtenSize = 0;
+
+        const filename = path.join(processedPath, 'update.zip');
+        const writeStream = createWriteStream(filename, 'binary');
+        try {
+            for (const file of files) {
+                const readStream = createReadStream(file.path, 'binary');
+
+                try {
+                    await new Promise<void>((resolve, reject) => {
+                        readStream.on('data', (chunk) => {
+                            if (typeof chunk === 'string') return;
+                            writtenSize += chunk.byteLength;
+                            job.updateProgress(
+                                getJobProgress(
+                                    processProgress[0],
+                                    processProgress[1],
+                                    writtenSize / readSize,
+                                ),
+                            );
+                        });
+                        readStream.on('error', (err) => reject(err));
+                        readStream.on('end', () => resolve());
+                    });
+                } finally {
+                    if (!readStream.destroyed) readStream.destroy();
+                }
+            }
+
+            writeStream.end();
+        } finally {
+            if (!writeStream.destroyed) writeStream.destroy();
+        }
+
+        await deleteFolder(StorageType.Input, filesPrefix);
+        await uploadFile(
+            StorageType.Input,
+            filename,
+            getUploadFile(versionId),
+            {
+                onProgress: (progress) =>
+                    job.updateProgress(
+                        getJobProgress(
+                            uploadProgress[0],
+                            uploadProgress[1],
+                            progress,
+                        ),
+                    ),
+            },
+        );
+    } finally {
+        await deleteDirectory(incomingPath);
+        await deleteDirectory(processedPath);
+    }
+};
+
+const processPublishVersion = async (
+    job: BullMQ.Job<UpdateJobData>,
+    data: IProcessPublishVersionJobData,
+) => {
+    const { versionId } = data;
+    const uploadPath = `publish/${versionId.toUpperCase()}/`;
+    const incomingPath = path.join(incomingUpdatesPath, uploadPath);
+    const decompressPath = path.join(
+        incomingUpdatesPath,
+        uploadPath,
+        'decompressed',
+    );
+    const processedPath = path.join(processedUpdatesPath, uploadPath);
+
+    await deleteDirectory(incomingPath);
+    await deleteDirectory(processedPath);
+    await mkdir(decompressPath, { recursive: true });
+    await mkdir(processedPath, { recursive: true });
+
+    try {
         const downloadProgress = [0, 20];
         const processProgress = [20, 50];
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const uploadProgress = [70, 20];
+        const uploadProgress = [50, 90];
 
-        if (UseSourceLocalStorage) {
-            const inputZip = resolve(SourceLocalStorageDir, `${versionId}.zip`);
-            unzipFile(inputZip, incomingUpdatesPath);
-        } else {
-            throw new Error(`not implemented yet`);
-        }
-        /*await downloadFromBucket(
-            process.env.GCP_UPDATE_IN!,
-            uploadPath,
-            incomingUpdatesPath,
-            (progress) => {
-                job.updateProgress(fixedProgress(downloadProgress[0] + downloadProgress[1] * progress));
-            }
-        );*/
+        const versionFile = path.join(incomingPath, 'update.zip');
+        await downloadFile(
+            StorageType.Input,
+            getUploadFile(versionId),
+            versionFile,
+            {
+                onProgress: (progress) =>
+                    job.updateProgress(
+                        getJobProgress(
+                            downloadProgress[0],
+                            downloadProgress[1],
+                            progress,
+                        ),
+                    ),
+            },
+        );
 
-        const filesList: Array<IFileInfo[]> = new Array<IFileInfo[]>(
+        await unzipFile(versionFile, decompressPath);
+
+        const filesList: Array<FileInfoExt[]> = new Array<FileInfoExt[]>(
             incomingFolders.length,
         );
         let filesCount = 0;
@@ -199,7 +310,7 @@ const processUpdateJob = async (job: BullMQ.Job<UpdateJobData>) => {
 
         for (let n = 0; n < incomingFolders.length; ++n) {
             filesList[n] = await enumerateFiles(
-                incomingPath + incomingFolders[n] + '/',
+                decompressPath + incomingFolders[n] + '/',
             );
             filesCount += filesList[n].length;
         }
@@ -211,12 +322,12 @@ const processUpdateJob = async (job: BullMQ.Job<UpdateJobData>) => {
         /* Process files */
         for (let n = 0; n < UpdateTypeLookup.length; ++n) {
             const files = filesList[n];
-            const basePath = incomingPath + incomingFolders[n] + '/';
+            const basePath = decompressPath + incomingFolders[n] + '/';
 
             for (let j = 0; j < files.length; ++j) {
                 const file = files[j];
-                const filePath = basePath + file.localPath;
-                const fileBuffer = await fsReadFileAsync(filePath);
+                const filePath = basePath + file.path;
+                const fileBuffer = await fsAsync.readFile(filePath);
                 const crc32 = new AwsCrc32();
                 crc32.update(fileBuffer);
                 const fileCrc32 = await crc32.digest();
@@ -236,7 +347,7 @@ const processUpdateJob = async (job: BullMQ.Job<UpdateJobData>) => {
                     .replace(/\\/g, '/');
                 const destDir = dest.substring(0, dest.lastIndexOf('/'));
                 await fsExtra.ensureDir(destDir);
-                await fsWriteFileAsync(
+                await fsAsync.writeFile(
                     processedPath + file.filename + file.extension,
                     compressedBuffer,
                 );
@@ -249,29 +360,23 @@ const processUpdateJob = async (job: BullMQ.Job<UpdateJobData>) => {
                         filesCount,
                         processProgress,
                     );
+                    reportCounter = 0;
                 }
             }
         }
 
         reportProcessFiles(job, processedCount, filesCount, processProgress);
 
-        if (UseOutputLocalStorage) {
-            const outputDir = resolve(OutputLocalStorageDir, uploadPath);
-            await fsAsync.rename(processedPath, outputDir);
-        } else {
-            throw new Error(`not implemented yet`);
-        }
-        /*await uploadToBucket(
-            process.env.GCP_UPDATE_OUT!,
-            processedPath,
-            uploadPath,
-            _.flatten(filesList).map(
-                file => `${file.filename}${file.extension}`
-            ),
-            (progress) => {
-                job.updateProgress(fixedProgress(uploadProgress[0] + uploadProgress[1] * progress));
-            }
-        );*/
+        await uploadFolder(StorageType.Output, decompressPath, uploadPath, {
+            onProgress: (progress) =>
+                job.updateProgress(
+                    getJobProgress(
+                        uploadProgress[0],
+                        uploadProgress[1],
+                        progress,
+                    ),
+                ),
+        });
 
         /* Insert files to database update table */
         const client = await getMongoClient();
@@ -290,7 +395,7 @@ const processUpdateJob = async (job: BullMQ.Job<UpdateJobData>) => {
                     category: UpdateTypeLookup[n],
                     fileName: file.filename!,
                     extension: file.extension!,
-                    localPath: file.localPath!,
+                    localPath: file.path!,
                     packedSize: file.packedSize!,
                     fileSize: file.fileSize!,
                     crc32: file.crc32!,
@@ -336,6 +441,16 @@ const processUpdateJob = async (job: BullMQ.Job<UpdateJobData>) => {
     } finally {
         await deleteDirectory(incomingPath);
         await deleteDirectory(processedPath);
+    }
+};
+
+const processUpdateJob = async (job: BullMQ.Job<UpdateJobData>) => {
+    const { type, data } = job.data;
+    switch (type) {
+        case UpdateServiceJobType.ProcessUploadVersion:
+            return processUploadVersion(job, data);
+        case UpdateServiceJobType.ProcessPublishVersion:
+            return processPublishVersion(job, data);
     }
 };
 

@@ -9,6 +9,7 @@ export interface IMDBVersion {
     version: IVersion;
     description: string;
     state: VersionState;
+    file?: string;
 
     createdAt: Date;
     updatedAt: Date;

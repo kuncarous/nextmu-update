@@ -12,6 +12,8 @@ import {
     getVersion,
     getVersions,
     processVersion,
+    startUploadVersion,
+    uploadVersionChunk,
 } from '~/services/api';
 import { IMDBVersion } from '~/services/mongodb/schemas/updates/versions';
 import { getVersionAsString, toTimestamp } from '~/utils';
@@ -54,6 +56,34 @@ const ZEditVersionRequest = z.object({
         .refine((v) => ObjectId.isValid(v))
         .transform((v) => new ObjectId(v)),
     description: z.string().min(1).max(256),
+});
+
+const ZStartUploadVersionRequest = z.object({
+    id: z
+        .string()
+        .refine((v) => ObjectId.isValid(v))
+        .transform((v) => new ObjectId(v)),
+    hash: z.literal('sha256'),
+    type: z.literal('application/zip'),
+    chunkSize: z.coerce
+        .number()
+        .multipleOf(2)
+        .min(16 * 1024)
+        .max(512 * 1024),
+    fileSize: z.coerce.number().min(1 * 1024),
+});
+
+const ZUploadVersionChunkRequest = z.object({
+    uploadId: z
+        .string()
+        .refine((v) => ObjectId.isValid(v))
+        .transform((v) => new ObjectId(v)),
+    concurrentId: z
+        .string()
+        .refine((v) => ObjectId.isValid(v))
+        .transform((v) => new ObjectId(v)),
+    offset: z.coerce.number().int().min(0),
+    data: z.instanceof(Buffer),
 });
 
 const ZProcessVersionRequest = z.object({
@@ -109,7 +139,7 @@ export const updateServiceServer: UpdateServiceHandlers = {
             });
         } catch (error) {
             handlegRpcError(
-                'UpdateServiceServer.createVersion',
+                'UpdateServiceServer.CreateVersion',
                 call,
                 callback,
                 error,
@@ -137,7 +167,7 @@ export const updateServiceServer: UpdateServiceHandlers = {
             callback(null, {});
         } catch (error) {
             handlegRpcError(
-                'UpdateServiceServer.editVersion',
+                'UpdateServiceServer.EditVersion',
                 call,
                 callback,
                 error,
@@ -168,7 +198,7 @@ export const updateServiceServer: UpdateServiceHandlers = {
             });
         } catch (error) {
             handlegRpcError(
-                'UpdateServiceServer.fetchVersion',
+                'UpdateServiceServer.FetchVersion',
                 call,
                 callback,
                 error,
@@ -200,7 +230,71 @@ export const updateServiceServer: UpdateServiceHandlers = {
             });
         } catch (error) {
             handlegRpcError(
-                'UpdateServiceServer.listVersions',
+                'UpdateServiceServer.ListVersions',
+                call,
+                callback,
+                error,
+            );
+        }
+    },
+    StartUploadVersion: async (call, callback) => {
+        const [auth, error] = await retrieveAuthMetadata(call);
+        if (error !== null) return callback(error);
+
+        const roles_error = await EditRoleValidator(auth!);
+        if (error != null) return callback(roles_error);
+
+        const parsed = ZStartUploadVersionRequest.safeParse(call.request);
+        if (parsed.success == false) {
+            return call.emit<grpc.ServiceError>('error', {
+                code: grpc.status.INVALID_ARGUMENT,
+                details: parsed.error.format()._errors.join('\n'),
+            });
+        }
+
+        try {
+            const { id, hash, type, chunkSize, fileSize } = parsed.data;
+            const response = await startUploadVersion(
+                id,
+                hash,
+                type,
+                chunkSize,
+                fileSize,
+            );
+
+            callback(null, response);
+        } catch (error) {
+            handlegRpcError(
+                'UpdateServiceServer.StartUploadVersion',
+                call,
+                callback,
+                error,
+            );
+        }
+    },
+    UploadVersionChunk: async (call, callback) => {
+        const [auth, error] = await retrieveAuthMetadata(call);
+        if (error !== null) return callback(error);
+
+        const roles_error = await EditRoleValidator(auth!);
+        if (error != null) return callback(roles_error);
+
+        const parsed = ZUploadVersionChunkRequest.safeParse(call.request);
+        if (parsed.success == false) {
+            return call.emit<grpc.ServiceError>('error', {
+                code: grpc.status.INVALID_ARGUMENT,
+                details: parsed.error.format()._errors.join('\n'),
+            });
+        }
+
+        try {
+            const { uploadId, concurrentId, offset, data } = parsed.data;
+            const response = await uploadVersionChunk(uploadId, concurrentId, offset, data);
+
+            callback(null, response);
+        } catch (error) {
+            handlegRpcError(
+                'UpdateServiceServer.UploadVersionChunk',
                 call,
                 callback,
                 error,
@@ -228,7 +322,7 @@ export const updateServiceServer: UpdateServiceHandlers = {
             callback(null, {});
         } catch (error) {
             handlegRpcError(
-                'UpdateServiceServer.processVersion',
+                'UpdateServiceServer.ProcessVersion',
                 call,
                 callback,
                 error,

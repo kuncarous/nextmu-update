@@ -1,7 +1,8 @@
 import { StatusCodes } from 'http-status-codes';
-import moment from 'moment';
 import { ObjectId, WithId } from 'mongodb';
 import { logger } from '~/logger';
+import { StartUploadVersionResponse__Output } from '~/proto/nextmu/v1/StartUploadVersionResponse';
+import { UploadVersionChunkResponse__Output } from '~/proto/nextmu/v1/UploadVersionChunkResponse';
 import { VersionState } from '~/proto/nextmu/v1/VersionState';
 import { VersionType } from '~/proto/nextmu/v1/VersionType';
 import { client as redis } from '~/services/redis';
@@ -18,11 +19,14 @@ import type {
     OperatingSystems,
     TextureFormat,
 } from '~/types/api/v1';
-import { UpdatesQueue } from '../bullmq';
+import { UpdateServiceJobType, UpdatesQueue } from '../bullmq';
 import { getMongoClient } from '../mongodb/client';
+import { IMDBUploadChunk } from '../mongodb/schemas/updates/chunks';
 import type { IMDBUpdateFile } from '../mongodb/schemas/updates/files';
+import { IMDBUpload } from '../mongodb/schemas/updates/uploads';
 import type { IMDBVersion } from '../mongodb/schemas/updates/versions';
-import { lockUpdateTransaction } from '../mongodb/update';
+import { deleteFolder, uploadBuffer } from '../storage';
+import { StorageType } from '../storage/enums';
 
 export const createVersion = async (type: VersionType, description: string) => {
     const client = await getMongoClient();
@@ -34,77 +38,120 @@ export const createVersion = async (type: VersionType, description: string) => {
         );
     }
 
-    const session = client.startSession();
-    session.startTransaction();
-
     try {
-        await lockUpdateTransaction(client, session);
-
         const versionsColl = client
             .db('updates')
             .collection<IMDBVersion>('versions');
 
-        const [version] = await versionsColl
-            .find(
-                {},
+        const versionId = new ObjectId();
+        const currentDate = new Date();
+        const versionField =
+            type === VersionType.MAJOR
+                ? 'version.major'
+                : type === VersionType.MINOR
+                  ? 'version.minor'
+                  : 'version.revision';
+        await versionsColl
+            .aggregate<WithId<IMDBVersion>>([
                 {
-                    session,
-                    sort: {
-                        createdAt: -1,
+                    $sort: {
+                        'version.major': -1,
+                        'version.minor': -1,
+                        'version.revision': -1,
                     },
-                    limit: 1,
                 },
-            )
-            .toArray();
+                {
+                    $limit: 1,
+                },
+                {
+                    $facet: {
+                        current: [
+                            {
+                                $match: {
+                                    _id: {
+                                        $ne: null,
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                },
+                {
+                    $project: {
+                        versions: {
+                            $cond: {
+                                if: {
+                                    $eq: [
+                                        {
+                                            $size: '$current',
+                                        },
+                                        0,
+                                    ],
+                                },
+                                then: [
+                                    {
+                                        version: {
+                                            major: 0,
+                                            minor: 0,
+                                            revision: 0,
+                                        },
+                                    },
+                                ],
+                                else: '$current',
+                            },
+                        },
+                    },
+                },
+                {
+                    $unwind: '$versions',
+                },
+                {
+                    $replaceRoot: {
+                        newRoot: '$versions',
+                    },
+                },
+                {
+                    $set: {
+                        _id: versionId,
+                        [versionField]: {
+                            $sum: [`$${versionField}`, 1],
+                        },
+                        description,
+                        state: VersionState.PENDING,
+                        createdAt: currentDate,
+                        updatedAt: currentDate,
+                    },
+                },
+                {
+                    $merge: {
+                        into: 'versions',
+                        on: '_id',
+                        whenMatched: 'keepExisting',
+                        whenNotMatched: 'insert',
+                    },
+                },
+            ])
+            .tryNext();
 
-        const createdAt = moment();
-        const versionToInsert: IMDBVersion = {
-            version:
-                version != null
-                    ? {
-                          major:
-                              type === VersionType.MAJOR
-                                  ? version.version.major + 1
-                                  : version.version.major,
-                          minor:
-                              type === VersionType.MINOR
-                                  ? version.version.minor + 1
-                                  : version.version.minor,
-                          revision:
-                              type === VersionType.REVISION
-                                  ? version.version.revision + 1
-                                  : version.version.revision,
-                      }
-                    : {
-                          major: 1,
-                          minor: 0,
-                          revision: 0,
-                      },
-            description,
-            state: VersionState.PENDING,
-            createdAt: createdAt.toDate(),
-            updatedAt: createdAt.toDate(),
-        };
-
-        const insertedVersion = await versionsColl.insertOne(versionToInsert, {
-            session,
-        });
-
-        await session.commitTransaction();
+        const result = await versionsColl.findOne({ _id: versionId });
+        if (result == null) {
+            throw new ResponseError(
+                StatusCodes.INTERNAL_SERVER_ERROR,
+                'service failed.',
+                `service failed, couldn't retrieve created version.`,
+            );
+        }
 
         return {
-            id: insertedVersion.insertedId,
-            version: versionToInsert.version,
+            id: result._id,
+            version: result.version,
         };
     } catch (error) {
-        await session.abortTransaction();
         throw new ResponseError(
             StatusCodes.SERVICE_UNAVAILABLE,
             'service unavailable.',
             `service unavailable, failed to connect mongodb.`,
         );
-    } finally {
-        await session.endSession();
     }
 };
 
@@ -293,7 +340,10 @@ export const processVersion = async (id: string) => {
         job = await UpdatesQueue.add(
             'processUpdate',
             {
-                versionId: id,
+                type: UpdateServiceJobType.ProcessPublishVersion,
+                data: {
+                    versionId: id,
+                },
             },
             {
                 jobId,
@@ -459,6 +509,202 @@ export const getUpdateFiles = async (
         return result;
     } catch (error) {
         logger.error(`[ERROR] getUpdateFiles failed : ${error}`);
+        throw error;
+    }
+};
+
+export const startUploadVersion = async (
+    id: ObjectId,
+    hash: string,
+    type: string,
+    chunkSize: number,
+    fileSize: number,
+): Promise<StartUploadVersionResponse__Output> => {
+    try {
+        const client = await getMongoClient();
+        if (!client) {
+            throw new Error('getMongoClient failed');
+        }
+
+        const uploadsColl = client
+            .db('updates')
+            .collection<IMDBUpload>('uploads');
+
+        const currentDate = new Date();
+        const uploadId = new ObjectId();
+        const concurrentId = new ObjectId();
+        const result = await uploadsColl.findOneAndUpdate(
+            {
+                versionId: id,
+            },
+            [
+                {
+                    $set: {
+                        concurrentId: {
+                            $cond: {
+                                if: {
+                                    $eq: [hash, '$hash'],
+                                },
+                                then: '$concurrentId',
+                                else: concurrentId,
+                            },
+                        },
+                        hash,
+                        fileSize,
+                        chunkSize,
+                        chunksCount: Math.ceil(fileSize / chunkSize),
+                    },
+                    $setOnInsert: {
+                        _id: uploadId,
+                        versionId: id,
+                        hash,
+                        type,
+                        fileSize,
+                        chunkSize,
+                        chunksCount: Math.ceil(fileSize / chunkSize),
+                        createdAt: currentDate,
+                        updatedAt: currentDate,
+                    },
+                },
+            ],
+            {
+                upsert: true,
+                returnDocument: 'before',
+            },
+        );
+
+        if (result == null) {
+            return {
+                id: uploadId.toHexString(),
+                existingChunks: [],
+            };
+        }
+
+        const chunksColl = client
+            .db('updates')
+            .collection<IMDBUploadChunk>('upload_chunks');
+
+        if (result.hash !== hash) {
+            await chunksColl.deleteMany({ uploadId: result._id, concurrentId });
+            await deleteFolder(
+                StorageType.Input,
+                `${id.toHexString()}/${hash}/`,
+            );
+        }
+
+        const chunks = await chunksColl
+            .find(
+                {
+                    uploadId: result._id,
+                },
+                {
+                    projection: {
+                        offset: 1,
+                        index: 1,
+                    },
+                },
+            )
+            .toArray();
+
+        return {
+            id: (result?._id ?? uploadId).toHexString(),
+            existingChunks: chunks
+                .sort((a, b) => a.offset - b.offset)
+                .map((c) => ({ offset: c.offset, size: c.size })),
+        };
+    } catch (error) {
+        logger.error(`[ERROR] startUploadVersion failed : ${error}`);
+        throw error;
+    }
+};
+
+export const uploadVersionChunk = async (
+    uploadId: ObjectId,
+    concurrentId: ObjectId,
+    offset: number,
+    data: Buffer,
+): Promise<UploadVersionChunkResponse__Output> => {
+    try {
+        if (data.byteLength === 0) {
+            throw new ResponseError(
+                StatusCodes.BAD_REQUEST,
+                'empty data buffer',
+            );
+        }
+
+        const client = await getMongoClient();
+        if (!client) {
+            throw new Error('getMongoClient failed');
+        }
+
+        const uploadsColl = client
+            .db('updates')
+            .collection<IMDBUpload>('uploads');
+        const chunksColl = client
+            .db('updates')
+            .collection<IMDBUploadChunk>('chunks');
+
+        const upload = await uploadsColl.findOne({
+            _id: uploadId,
+            concurrentId,
+        });
+        if (upload == null) {
+            throw new ResponseError(
+                StatusCodes.BAD_REQUEST,
+                'invalid upload id or concurrent id',
+            );
+        }
+
+        if (offset >= upload.chunksCount) {
+            throw new ResponseError(
+                StatusCodes.BAD_REQUEST,
+                'invalid chunk offset',
+            );
+        }
+
+        if (offset == upload.chunksCount - 1) {
+            if (
+                upload.fileSize - upload.chunkSize * (upload.chunksCount - 1) !=
+                data.byteLength
+            ) {
+                throw new ResponseError(
+                    StatusCodes.BAD_REQUEST,
+                    'invalid chunk size',
+                );
+            }
+        } else {
+            if (upload.chunkSize != data.byteLength) {
+                throw new ResponseError(
+                    StatusCodes.BAD_REQUEST,
+                    'invalid chunk size',
+                );
+            }
+        }
+
+        await uploadBuffer(
+            StorageType.Input,
+            data,
+            `${upload._id.toHexString()}/${upload.hash}/${offset}.data`,
+        );
+
+        await chunksColl.insertOne({
+            uploadId,
+            concurrentId,
+            offset,
+            size: data.length,
+            createdAt: new Date(),
+        });
+
+        const chunksCount = await chunksColl.countDocuments({
+            uploadId,
+            concurrentId,
+        });
+
+        return {
+            finished: upload.chunksCount === chunksCount,
+        };
+    } catch (error) {
+        logger.error(`[ERROR] uploadVersionChunk failed : ${error}`);
         throw error;
     }
 };

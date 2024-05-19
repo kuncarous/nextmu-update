@@ -543,7 +543,14 @@ export const startUploadVersion = async (
                         concurrentId: {
                             $cond: {
                                 if: {
-                                    $eq: [hash, '$hash'],
+                                    $and: [
+                                        {
+                                            $eq: [hash, '$hash'],
+                                        },
+                                        {
+                                            $eq: [chunkSize, '$chunkSize'],
+                                        },
+                                    ],
                                 },
                                 then: '$concurrentId',
                                 else: concurrentId,
@@ -584,7 +591,7 @@ export const startUploadVersion = async (
             .db('updates')
             .collection<IMDBUploadChunk>('upload_chunks');
 
-        if (result.hash !== hash) {
+        if (result.hash !== hash || result.chunkSize !== chunkSize) {
             await chunksColl.deleteMany({ uploadId: result._id, concurrentId });
             await deleteFolder(
                 StorageType.Input,

@@ -70,7 +70,10 @@ const ZStartUploadVersionRequest = z.object({
         .multipleOf(2)
         .min(16 * 1024)
         .max(512 * 1024),
-    fileSize: z.coerce.number().min(1 * 1024),
+    fileSize: z.coerce
+        .number()
+        .min(1 * 1024)
+        .max(5 * 1024 * 1024 * 1024), // Min 1KB, Max 5GB
 });
 
 const ZUploadVersionChunkRequest = z.object({
@@ -289,7 +292,12 @@ export const updateServiceServer: UpdateServiceHandlers = {
 
         try {
             const { uploadId, concurrentId, offset, data } = parsed.data;
-            const response = await uploadVersionChunk(uploadId, concurrentId, offset, data);
+            const response = await uploadVersionChunk(
+                uploadId,
+                concurrentId,
+                offset,
+                data,
+            );
 
             callback(null, response);
         } catch (error) {

@@ -582,7 +582,8 @@ export const startUploadVersion = async (
 
         if (result == null) {
             return {
-                id: uploadId.toHexString(),
+                uploadId: uploadId.toHexString(),
+                concurrentId: concurrentId.toHexString(),
                 existingChunks: [],
             };
         }
@@ -614,7 +615,8 @@ export const startUploadVersion = async (
             .toArray();
 
         return {
-            id: (result?._id ?? uploadId).toHexString(),
+            uploadId: (result?._id ?? uploadId).toHexString(),
+            concurrentId: (result?.concurrentId ?? concurrentId).toHexString(),
             existingChunks: chunks
                 .sort((a, b) => a.offset - b.offset)
                 .map((c) => ({ offset: c.offset, size: c.size })),

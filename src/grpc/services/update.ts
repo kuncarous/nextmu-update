@@ -59,11 +59,14 @@ const ZEditVersionRequest = z.object({
 });
 
 const ZStartUploadVersionRequest = z.object({
-    id: z
+    versionId: z
         .string()
         .refine((v) => ObjectId.isValid(v))
         .transform((v) => new ObjectId(v)),
-    hash: z.literal('sha256'),
+    hash: z
+        .string()
+        .length(64)
+        .regex(/^[a-fA-F\d]{64}$/),
     type: z.literal('application/zip'),
     chunkSize: z.coerce
         .number()
@@ -256,9 +259,9 @@ export const updateServiceServer: UpdateServiceHandlers = {
         }
 
         try {
-            const { id, hash, type, chunkSize, fileSize } = parsed.data;
+            const { versionId, hash, type, chunkSize, fileSize } = parsed.data;
             const response = await startUploadVersion(
-                id,
+                versionId,
                 hash,
                 type,
                 chunkSize,

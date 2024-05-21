@@ -18,6 +18,11 @@ interface IStorageConfig {
 const storageConfigs = new Map<StorageType, IStorageConfig>();
 const loadStorageConfigs = () => {
     for (const storageType of StorageTypes) {
+        if (
+            process.env[`${storageType}_STORAGE_PROVIDER`] !==
+            StorageProvider.Local
+        )
+            continue;
         storageConfigs.set(storageType, {
             path: path.resolve(
                 process.env[`${storageType}_STORAGE_BUCKET`]!,
@@ -32,9 +37,14 @@ const getStorageConfig = (storageType: StorageType) => {
 };
 
 // check environment variables
-if (process.env.STORAGE_PROVIDER === StorageProvider.Local) {
+{
     const errors = [];
     for (const storageType of StorageTypes) {
+        if (
+            process.env[`${storageType}_STORAGE_PROVIDER`] !==
+            StorageProvider.GCP
+        )
+            continue;
         if (!process.env[`${storageType}_STORAGE_BUCKET`])
             errors.push(`${storageType}_STORAGE_BUCKET isn't configured`);
         if (!process.env[`${storageType}_STORAGE_SUBPATH`])
@@ -99,9 +109,10 @@ export const downloadFile = async (
 
             readStream.pipe(writeStream);
         });
-    } finally {
-        if (!readStream.destroyed) readStream.destroy();
-        if (!writeStream.destroyed) writeStream.destroy();
+    } catch (e) {
+        writeStream.end();
+        await rm(dest);
+        throw e;
     }
 };
 
@@ -120,7 +131,7 @@ export const downloadFolder = async (
     if (files.length === 0) throw new EmptyFolderError(source);
 
     for (const file of files) {
-        const stats = await stat(file.path);
+        const stats = await stat(file.fullPath);
         file.size = stats.size;
     }
 
@@ -133,7 +144,7 @@ export const downloadFolder = async (
     const maxParallel = 10;
     const promises: Promise<void>[] = [];
     for (const file of files) {
-        const filename = path.join(dest, file.path.substring(source.length));
+        const filename = path.join(dest, file.path);
         const directory = filename.substring(
             0,
             filename.lastIndexOf(path.sep) + 1,
@@ -141,7 +152,7 @@ export const downloadFolder = async (
 
         await mkdir(directory, { recursive: true });
 
-        const readStream = createReadStream(file.path, 'binary');
+        const readStream = createReadStream(file.fullPath, 'binary');
         const writeStream = createWriteStream(filename, 'binary');
         const promise = new Promise<void>((resolve, reject) => {
             readStream.on('data', (chunk) => {
@@ -150,8 +161,6 @@ export const downloadFolder = async (
                 options?.onProgress(writtenSize / readSize);
             });
             readStream.on('error', (err) => {
-                writeStream.destroy();
-                rmSync(filename);
                 reject(err);
             });
             readStream.on('end', () => {
@@ -159,10 +168,13 @@ export const downloadFolder = async (
                 resolve();
             });
             readStream.pipe(writeStream);
-        }).finally(() => {
+        });
+        promise.catch(() => {
+            writeStream.destroy();
+            rmSync(filename);
+        });
+        promise.finally(() => {
             promises.splice(promises.indexOf(promise), 1);
-            if (!readStream.destroyed) readStream.destroy();
-            if (!writeStream.destroyed) writeStream.destroy();
         });
         promises.push(promise);
 
@@ -218,9 +230,10 @@ export const uploadFile = async (
 
             readStream.pipe(writeStream);
         });
-    } finally {
-        if (!readStream.destroyed) readStream.destroy();
-        if (!writeStream.destroyed) writeStream.destroy();
+    } catch (e) {
+        writeStream.end();
+        await rm(destPath);
+        throw e;
     }
 };
 
@@ -261,9 +274,10 @@ export const uploadBuffer = async (
 
             readStream.pipe(writeStream);
         });
-    } finally {
-        if (!readStream.destroyed) readStream.destroy();
-        if (!writeStream.destroyed) writeStream.destroy();
+    } catch (e) {
+        writeStream.end();
+        await rm(destPath);
+        throw e;
     }
 };
 
@@ -282,7 +296,7 @@ export const uploadFolder = async (
     if (files.length === 0) throw new EmptyFolderError(source);
 
     for (const file of files) {
-        const stats = await stat(file.path);
+        const stats = await stat(file.fullPath);
         file.size = stats.size;
     }
 
@@ -295,11 +309,7 @@ export const uploadFolder = async (
     const maxParallel = 10;
     const promises: Promise<void>[] = [];
     for (const file of files) {
-        const filename = path.join(
-            storageConfig.path,
-            dest,
-            file.path.substring(source.length),
-        );
+        const filename = path.join(storageConfig.path, dest, file.path);
         const directory = filename.substring(
             0,
             filename.lastIndexOf(path.sep) + 1,
@@ -307,7 +317,7 @@ export const uploadFolder = async (
 
         await mkdir(directory, { recursive: true });
 
-        const readStream = createReadStream(file.path, 'binary');
+        const readStream = createReadStream(file.fullPath, 'binary');
         const writeStream = createWriteStream(filename, 'binary');
         const promise = new Promise<void>((resolve, reject) => {
             readStream.on('data', (chunk) => {
@@ -316,8 +326,6 @@ export const uploadFolder = async (
                 options?.onProgress(writtenSize / readSize);
             });
             readStream.on('error', (err) => {
-                writeStream.destroy();
-                rmSync(filename);
                 reject(err);
             });
             readStream.on('end', () => {
@@ -325,10 +333,13 @@ export const uploadFolder = async (
                 resolve();
             });
             readStream.pipe(writeStream);
-        }).finally(() => {
+        });
+        promise.catch(() => {
+            writeStream.end();
+            rmSync(filename);
+        });
+        promise.finally(() => {
             promises.splice(promises.indexOf(promise), 1);
-            if (!readStream.destroyed) readStream.destroy();
-            if (!writeStream.destroyed) writeStream.destroy();
         });
         promises.push(promise);
 

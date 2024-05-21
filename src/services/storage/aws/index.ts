@@ -36,6 +36,11 @@ interface IStorageConfig {
 const storageConfigs = new Map<StorageType, IStorageConfig>();
 const loadStorageConfigs = () => {
     for (const storageType of StorageTypes) {
+        if (
+            process.env[`${storageType}_STORAGE_PROVIDER`] !==
+            StorageProvider.AWS
+        )
+            continue;
         const accessKeyId = process.env[`${storageType}_ACCESS_KEY_ID`];
         const secretAccessKey = process.env[`${storageType}_SECRET_ACCESS_KEY`];
         const region = process.env[`${storageType}_REGION`];
@@ -66,9 +71,14 @@ const getStorageConfig = (storageType: StorageType) => {
 };
 
 // check environment variables
-if (process.env.STORAGE_PROVIDER === StorageProvider.AWS) {
+{
     const errors = [];
     for (const storageType of StorageTypes) {
+        if (
+            process.env[`${storageType}_STORAGE_PROVIDER`] !==
+            StorageProvider.AWS
+        )
+            continue;
         if (!process.env[`${storageType}_STORAGE_BUCKET`])
             errors.push(`${storageType}_STORAGE_BUCKET isn't configured`);
         if (!process.env[`${storageType}_STORAGE_SUBPATH`])
@@ -181,7 +191,8 @@ export const downloadFolder = async (
             if (resultFiles.Contents != null) {
                 for (const file of resultFiles.Contents) {
                     files.push({
-                        path: file.Key!,
+                        fullPath: file.Key!,
+                        path: file.Key!.substring(source.length),
                         size: file.Size!,
                     });
                 }
@@ -200,10 +211,7 @@ export const downloadFolder = async (
         const promises: Promise<void>[] = [];
 
         for (const file of files) {
-            const filename = path.resolve(
-                dest,
-                file.path.substring(source.length),
-            );
+            const filename = path.resolve(dest, file.path);
             const directory = filename.substring(
                 0,
                 filename.lastIndexOf(path.sep) + 1,
@@ -214,7 +222,7 @@ export const downloadFolder = async (
                 .send(
                     new AWS.GetObjectCommand({
                         Bucket: process.env.STORAGE_BUCKET,
-                        Key: file.path,
+                        Key: file.fullPath,
                     }),
                 )
                 .then(async (response) => {
@@ -222,12 +230,12 @@ export const downloadFolder = async (
                         filename,
                         await response.Body!.transformToByteArray(),
                     );
-                })
-                .finally(() => {
-                    writtenSize += file.size!;
-                    options?.onProgress(writtenSize / readSize);
-                    promises.splice(promises.indexOf(promise), 1);
                 });
+            promise.finally(() => {
+                writtenSize += file.size!;
+                options?.onProgress(writtenSize / readSize);
+                promises.splice(promises.indexOf(promise), 1);
+            });
 
             promises.push(promise);
 
@@ -262,13 +270,13 @@ export const uploadFile = async (
 
     dest = path.join(storageConfig.subPath, dest).replaceAll('\\', '/');
 
-    const stream = createReadStream(source);
+    const readStream = createReadStream(source);
     try {
         await storageConfig.client.send(
             new AWS.PutObjectCommand({
                 Bucket: process.env.STORAGE_BUCKET!,
                 Key: dest,
-                Body: stream,
+                Body: readStream,
                 ContentType: 'application/octet-stream',
             }),
         );
@@ -277,7 +285,7 @@ export const uploadFile = async (
         logger.error(`Services.Storage.AWS.uploadFile failed : ${e}`);
         throw e;
     } finally {
-        stream.destroy();
+        readStream.close();
     }
 };
 
@@ -323,7 +331,7 @@ export const uploadFolder = async (
     if (files.length === 0) throw new EmptyFolderError(source);
 
     for (const file of files) {
-        const stats = await stat(file.path);
+        const stats = await stat(file.fullPath);
         file.size = stats.size;
     }
 
@@ -338,27 +346,23 @@ export const uploadFolder = async (
         const promises: Promise<AWS.PutObjectCommandOutput>[] = [];
 
         for (const file of files) {
-            const filename = path.join(
-                dest,
-                file.path.substring(source.length),
-            );
+            const filename = path.join(dest, file.path);
 
-            const stream = createReadStream(file.path);
-            const promise = storageConfig.client
-                .send(
-                    new AWS.PutObjectCommand({
-                        Bucket: process.env.STORAGE_BUCKET,
-                        Key: filename,
-                        Body: stream,
-                        ContentType: 'application/octet-stream',
-                    }),
-                )
-                .finally(() => {
-                    writtenSize += file.size!;
-                    options?.onProgress(writtenSize / readSize);
-                    promises.splice(promises.indexOf(promise), 1);
-                    stream.destroy();
-                });
+            const readStream = createReadStream(file.fullPath);
+            const promise = storageConfig.client.send(
+                new AWS.PutObjectCommand({
+                    Bucket: process.env.STORAGE_BUCKET,
+                    Key: filename,
+                    Body: readStream,
+                    ContentType: 'application/octet-stream',
+                }),
+            );
+            promise.finally(() => {
+                writtenSize += file.size!;
+                options?.onProgress(writtenSize / readSize);
+                promises.splice(promises.indexOf(promise), 1);
+                readStream.close();
+            });
 
             promises.push(promise);
 

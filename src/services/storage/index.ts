@@ -5,7 +5,7 @@ import * as LocalStorage from './local';
 import { IStorageOptions } from './types';
 
 export const deleteFolder = async (storageType: StorageType, dir: string) => {
-    switch (process.env.STORAGE_PROVIDER) {
+    switch (process.env[`${storageType}_STORAGE_PROVIDER`]) {
         case StorageProvider.Local:
             return await LocalStorage.deleteFolder(storageType, dir);
         case StorageProvider.AWS:
@@ -14,7 +14,7 @@ export const deleteFolder = async (storageType: StorageType, dir: string) => {
             return await GCPStorage.deleteFolder(storageType, dir);
         default:
             throw new Error(
-                'STORAGE_PROVIDER has an invalid value, please configure it.',
+                `${storageType}_STORAGE_PROVIDER has an invalid value, please configure it.`,
             );
     }
 };
@@ -25,7 +25,7 @@ export const downloadFile = async (
     dest: string,
     options?: IStorageOptions,
 ) => {
-    switch (process.env.STORAGE_PROVIDER) {
+    switch (process.env[`${storageType}_STORAGE_PROVIDER`]) {
         case StorageProvider.Local:
             return await LocalStorage.downloadFile(
                 storageType,
@@ -49,7 +49,7 @@ export const downloadFile = async (
             );
         default:
             throw new Error(
-                'STORAGE_PROVIDER has an invalid value, please configure it.',
+                `${storageType}_STORAGE_PROVIDER has an invalid value, please configure it.`,
             );
     }
 };
@@ -60,7 +60,7 @@ export const downloadFolder = async (
     dest: string,
     options?: IStorageOptions,
 ) => {
-    switch (process.env.STORAGE_PROVIDER) {
+    switch (process.env[`${storageType}_STORAGE_PROVIDER`]) {
         case StorageProvider.Local:
             return await LocalStorage.downloadFolder(
                 storageType,
@@ -84,7 +84,7 @@ export const downloadFolder = async (
             );
         default:
             throw new Error(
-                'STORAGE_PROVIDER has an invalid value, please configure it.',
+                `${storageType}_STORAGE_PROVIDER has an invalid value, please configure it.`,
             );
     }
 };
@@ -95,7 +95,7 @@ export const uploadFile = async (
     dest: string,
     options?: IStorageOptions,
 ) => {
-    switch (process.env.STORAGE_PROVIDER) {
+    switch (process.env[`${storageType}_STORAGE_PROVIDER`]) {
         case StorageProvider.Local:
             return await LocalStorage.uploadFile(
                 storageType,
@@ -119,7 +119,7 @@ export const uploadFile = async (
             );
         default:
             throw new Error(
-                'STORAGE_PROVIDER has an invalid value, please configure it.',
+                `${storageType}_STORAGE_PROVIDER has an invalid value, please configure it.`,
             );
     }
 };
@@ -130,7 +130,7 @@ export const uploadBuffer = async (
     dest: string,
     options?: IStorageOptions,
 ) => {
-    switch (process.env.STORAGE_PROVIDER) {
+    switch (process.env[`${storageType}_STORAGE_PROVIDER`]) {
         case StorageProvider.Local:
             return await LocalStorage.uploadBuffer(
                 storageType,
@@ -154,7 +154,7 @@ export const uploadBuffer = async (
             );
         default:
             throw new Error(
-                'STORAGE_PROVIDER has an invalid value, please configure it.',
+                `${storageType}_STORAGE_PROVIDER has an invalid value, please configure it.`,
             );
     }
 };
@@ -165,7 +165,7 @@ export const uploadFolder = async (
     dest: string,
     options?: IStorageOptions,
 ) => {
-    switch (process.env.STORAGE_PROVIDER) {
+    switch (process.env[`${storageType}_STORAGE_PROVIDER`]) {
         case StorageProvider.Local:
             return await LocalStorage.uploadFolder(
                 storageType,
@@ -189,7 +189,7 @@ export const uploadFolder = async (
             );
         default:
             throw new Error(
-                'STORAGE_PROVIDER has an invalid value, please configure it.',
+                `${storageType}_STORAGE_PROVIDER has an invalid value, please configure it.`,
             );
     }
 };

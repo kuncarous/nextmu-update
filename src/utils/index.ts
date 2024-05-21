@@ -1,6 +1,7 @@
 /*global NodeJS*/
 import { existsSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
+import path from 'node:path';
 import type {
     Timestamp,
     Timestamp__Output,
@@ -28,29 +29,30 @@ export const getVersionAsString = (version: IVersion) =>
     `${version.major}.${version.minor}.${version.revision}`;
 
 export type FileInfo = {
+    fullPath: string;
     path: string;
 };
 export const enumerateFiles = async (
-    path: string,
-    relativePath: string = '',
+    directory: string,
+    relative: string = '',
 ): Promise<FileInfo[]> => {
     const files: FileInfo[] = [];
-    if (!existsSync(path)) return files;
+    if (!existsSync(directory)) return files;
 
-    const dirents = await readdir(path, { withFileTypes: true });
+    const dirents = await readdir(directory, { withFileTypes: true });
     for (const dirent of dirents) {
-        if (dirent.isFile()) {
-            files.push({
-                path: relativePath + dirent.name,
-            });
-        }
+        if (dirent.isFile() == false) continue;
+        files.push({
+            fullPath: path.join(directory, dirent.name),
+            path: path.join(relative, dirent.name),
+        });
     }
     for (const dirent of dirents) {
         if (dirent.isDirectory()) {
             files.push(
                 ...(await enumerateFiles(
-                    path + dirent.name + '/',
-                    relativePath + dirent.name + '/',
+                    path.join(directory, dirent.name),
+                    path.join(relative, dirent.name),
                 )),
             );
         }
@@ -72,8 +74,9 @@ export const fileStats = async (filename: string) => {
     }
 };
 
-export const getInputFolder = (versionId: string, uploadId: string) =>
-    `${versionId.toUpperCase()}/${uploadId.toUpperCase()}/`;
-export const getUploadFile = (versionId: string) => `${versionId.toUpperCase()}.zip`;
+export const getInputFolder = (uploadId: string, hash: string) =>
+    `${uploadId.toUpperCase()}/${hash.toUpperCase()}/`;
+export const getUploadFile = (versionId: string) =>
+    `${versionId.toUpperCase()}.zip`;
 export const getOutputFolder = (versionId: string) =>
     `${versionId.toUpperCase()}/`;

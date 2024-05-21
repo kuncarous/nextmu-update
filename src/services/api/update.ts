@@ -1,11 +1,13 @@
 import { StatusCodes } from 'http-status-codes';
 import { ObjectId, WithId } from 'mongodb';
+import path from 'node:path';
 import { logger } from '~/logger';
+import { ChunkInfo__Output } from '~/proto/nextmu/v1/ChunkInfo';
 import { StartUploadVersionResponse__Output } from '~/proto/nextmu/v1/StartUploadVersionResponse';
 import { UploadVersionChunkResponse__Output } from '~/proto/nextmu/v1/UploadVersionChunkResponse';
 import { VersionState } from '~/proto/nextmu/v1/VersionState';
 import { VersionType } from '~/proto/nextmu/v1/VersionType';
-import { client as redis } from '~/services/redis';
+import { getRedisClient } from '~/services/redis';
 import {
     OperatingSystemLookup,
     PlatformLookup,
@@ -19,6 +21,7 @@ import type {
     OperatingSystems,
     TextureFormat,
 } from '~/types/api/v1';
+import { getInputFolder } from '~/utils';
 import { UpdateServiceJobType, UpdatesQueue } from '../bullmq';
 import { getMongoClient } from '../mongodb/client';
 import { IMDBUploadChunk } from '../mongodb/schemas/updates/chunks';
@@ -326,6 +329,39 @@ export const getVersion = async (versionId: ObjectId) => {
     return version;
 };
 
+export const processUpdateFile = async (
+    id: string,
+    uploadId: string,
+    concurrentId: string,
+) => {
+    const jobId = `version-${id}-${uploadId}-${concurrentId}`;
+    let job = await UpdatesQueue.getJob(jobId);
+    if (job) {
+        if (await job.isFailed()) {
+            await job.remove();
+            job = undefined;
+        }
+    }
+
+    if (!job) {
+        job = await UpdatesQueue.add(
+            `[${id}:${uploadId}] Process Update File`,
+            {
+                type: UpdateServiceJobType.ProcessUploadVersion,
+                data: {
+                    versionId: id,
+                    uploadId,
+                    concurrentId,
+                },
+            },
+            {
+                jobId,
+                removeOnComplete: true,
+            },
+        );
+    }
+};
+
 export const processVersion = async (id: string) => {
     const jobId = `version-${id}`;
     let job = await UpdatesQueue.getJob(jobId);
@@ -338,7 +374,7 @@ export const processVersion = async (id: string) => {
 
     if (!job) {
         job = await UpdatesQueue.add(
-            'processUpdate',
+            `[${id}] Process Update`,
             {
                 type: UpdateServiceJobType.ProcessPublishVersion,
                 data: {
@@ -422,6 +458,7 @@ export const getUpdateFiles = async (
             os,
             texture,
         );
+        const redis = await getRedisClient();
         const updateData = await redis.get(updateKey);
         if (updateData != null) return JSON.parse(updateData);
 
@@ -540,6 +577,9 @@ export const startUploadVersion = async (
             [
                 {
                     $set: {
+                        _id: {
+                            $ifNull: ['$_id', uploadId],
+                        },
                         concurrentId: {
                             $cond: {
                                 if: {
@@ -557,20 +597,29 @@ export const startUploadVersion = async (
                             },
                         },
                         hash,
-                        fileSize,
-                        chunkSize,
-                        chunksCount: Math.ceil(fileSize / chunkSize),
-                    },
-                    $setOnInsert: {
-                        _id: uploadId,
-                        versionId: id,
-                        hash,
                         type,
                         fileSize,
                         chunkSize,
                         chunksCount: Math.ceil(fileSize / chunkSize),
-                        createdAt: currentDate,
-                        updatedAt: currentDate,
+                        createdAt: {
+                            $ifNull: ['$createdAt', currentDate],
+                        },
+                        updatedAt: {
+                            $cond: {
+                                if: {
+                                    $and: [
+                                        {
+                                            $eq: [hash, '$hash'],
+                                        },
+                                        {
+                                            $eq: [chunkSize, '$chunkSize'],
+                                        },
+                                    ],
+                                },
+                                then: '$updatedAt',
+                                else: currentDate,
+                            },
+                        },
                     },
                 },
             ],
@@ -590,7 +639,7 @@ export const startUploadVersion = async (
 
         const chunksColl = client
             .db('updates')
-            .collection<IMDBUploadChunk>('upload_chunks');
+            .collection<IMDBUploadChunk>('chunks');
 
         if (result.hash !== hash || result.chunkSize !== chunkSize) {
             await chunksColl.deleteMany({ uploadId: result._id, concurrentId });
@@ -608,7 +657,6 @@ export const startUploadVersion = async (
                 {
                     projection: {
                         offset: 1,
-                        index: 1,
                     },
                 },
             )
@@ -619,7 +667,19 @@ export const startUploadVersion = async (
             concurrentId: (result?.concurrentId ?? concurrentId).toHexString(),
             existingChunks: chunks
                 .sort((a, b) => a.offset - b.offset)
-                .map((c) => ({ offset: c.offset, size: c.size })),
+                .map((c) => ({ offset: c.offset, size: 1 }))
+                .reduce<ChunkInfo__Output[]>((previousValue, currentValue) => {
+                    if (previousValue.length === 0) return [currentValue];
+                    const lastValue = previousValue[previousValue.length - 1];
+                    if (
+                        lastValue.offset + lastValue.size ===
+                        currentValue.offset
+                    ) {
+                        ++lastValue.size;
+                        return previousValue;
+                    }
+                    return [...previousValue, currentValue];
+                }, []),
         };
     } catch (error) {
         logger.error(`[ERROR] startUploadVersion failed : ${error}`);
@@ -693,7 +753,12 @@ export const uploadVersionChunk = async (
         await uploadBuffer(
             StorageType.Input,
             data,
-            `${upload._id.toHexString()}/${upload.hash}/${offset}.data`,
+            path
+                .join(
+                    getInputFolder(uploadId.toHexString(), upload.hash),
+                    `${offset.toString().padStart(8, '0')}.data`,
+                )
+                .replaceAll('\\', '/'),
         );
 
         await chunksColl.insertOne({
@@ -708,6 +773,14 @@ export const uploadVersionChunk = async (
             uploadId,
             concurrentId,
         });
+
+        if (upload.chunksCount === chunksCount) {
+            await processUpdateFile(
+                upload.versionId.toHexString(),
+                uploadId.toHexString(),
+                concurrentId.toHexString(),
+            );
+        }
 
         return {
             finished: upload.chunksCount === chunksCount,

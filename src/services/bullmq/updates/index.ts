@@ -10,7 +10,7 @@ import fs, {
     createWriteStream,
     promises as fsAsync,
 } from 'node:fs';
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, rm, stat } from 'node:fs/promises';
 import path, { resolve } from 'node:path';
 import { v4 as uuidv4 } from 'uuid-mongodb';
 import zlib from 'zlib';
@@ -161,7 +161,11 @@ const processUploadVersion = async (
         _id: new ObjectId(uploadId),
         concurrentId: new ObjectId(concurrentId),
     });
-    if (upload == null || upload.versionId.equals(versionId) == false) {
+    if (
+        upload == null ||
+        upload.versionId.equals(versionId) == false ||
+        upload.concurrentId.equals(concurrentId) == false
+    ) {
         return;
     }
 
@@ -179,7 +183,7 @@ const processUploadVersion = async (
         const processProgress = [50, 90];
         const uploadProgress = [90, 100];
 
-        const filesPrefix = getInputFolder(versionId, uploadId);
+        const filesPrefix = getInputFolder(uploadId, upload.hash);
         await downloadFolder(StorageType.Input, filesPrefix, incomingPath, {
             onProgress: (progress) =>
                 job.updateProgress(
@@ -193,7 +197,7 @@ const processUploadVersion = async (
 
         const files: FileInfoExt[] = await enumerateFiles(incomingPath);
         for (const file of files) {
-            const stats = await stat(file.path);
+            const stats = await stat(path.join(incomingPath, file.path));
             file.fileSize = stats.size;
         }
 
@@ -208,32 +212,32 @@ const processUploadVersion = async (
         const writeStream = createWriteStream(filename, 'binary');
         try {
             for (const file of files) {
-                const readStream = createReadStream(file.path, 'binary');
+                const readStream = createReadStream(file.fullPath, 'binary');
 
-                try {
-                    await new Promise<void>((resolve, reject) => {
-                        readStream.on('data', (chunk) => {
-                            if (typeof chunk === 'string') return;
-                            writtenSize += chunk.byteLength;
-                            job.updateProgress(
-                                getJobProgress(
-                                    processProgress[0],
-                                    processProgress[1],
-                                    writtenSize / readSize,
-                                ),
-                            );
-                        });
-                        readStream.on('error', (err) => reject(err));
-                        readStream.on('end', () => resolve());
+                await new Promise<void>((resolve, reject) => {
+                    readStream.on('data', (chunk) => {
+                        if (typeof chunk === 'string') return;
+                        writtenSize += chunk.byteLength;
+                        job.updateProgress(
+                            getJobProgress(
+                                processProgress[0],
+                                processProgress[1],
+                                writtenSize / readSize,
+                            ),
+                        );
                     });
-                } finally {
-                    if (!readStream.destroyed) readStream.destroy();
-                }
+                    readStream.on('error', (err) => reject(err));
+                    readStream.on('end', () => resolve());
+
+                    readStream.pipe(writeStream, { end: false });
+                });
             }
 
             writeStream.end();
-        } finally {
-            if (!writeStream.destroyed) writeStream.destroy();
+        } catch (e) {
+            writeStream.end();
+            await rm(filename);
+            throw e;
         }
 
         await deleteFolder(StorageType.Input, filesPrefix);
@@ -310,7 +314,7 @@ const processPublishVersion = async (
 
         for (let n = 0; n < incomingFolders.length; ++n) {
             filesList[n] = await enumerateFiles(
-                decompressPath + incomingFolders[n] + '/',
+                path.join(decompressPath, incomingFolders[n]),
             );
             filesCount += filesList[n].length;
         }
@@ -322,12 +326,10 @@ const processPublishVersion = async (
         /* Process files */
         for (let n = 0; n < UpdateTypeLookup.length; ++n) {
             const files = filesList[n];
-            const basePath = decompressPath + incomingFolders[n] + '/';
 
             for (let j = 0; j < files.length; ++j) {
                 const file = files[j];
-                const filePath = basePath + file.path;
-                const fileBuffer = await fsAsync.readFile(filePath);
+                const fileBuffer = await fsAsync.readFile(file.fullPath);
                 const crc32 = new AwsCrc32();
                 crc32.update(fileBuffer);
                 const fileCrc32 = await crc32.digest();

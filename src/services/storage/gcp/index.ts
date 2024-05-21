@@ -1,6 +1,6 @@
 import * as Google from '@google-cloud/storage';
-import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, stat } from 'node:fs/promises';
+import { createReadStream, createWriteStream, rmSync } from 'node:fs';
+import { mkdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { logger } from '~/logger';
@@ -22,6 +22,11 @@ interface IStorageConfig {
 const storageConfigs = new Map<StorageType, IStorageConfig>();
 const loadStorageConfigs = () => {
     for (const storageType of StorageTypes) {
+        if (
+            process.env[`${storageType}_STORAGE_PROVIDER`] !==
+            StorageProvider.GCP
+        )
+            continue;
         const projectId = process.env[`${storageType}_STORAGE_PROJECT_ID`];
         const keyFile = process.env[`${storageType}_STORAGE_KEY_FILE`];
         const useDefaultCredentials = !projectId || !keyFile;
@@ -50,9 +55,14 @@ const getStorageConfig = (storageType: StorageType) => {
 };
 
 // check environment variables
-if (process.env.STORAGE_PROVIDER === StorageProvider.GCP) {
+{
     const errors = [];
     for (const storageType of StorageTypes) {
+        if (
+            process.env[`${storageType}_STORAGE_PROVIDER`] !==
+            StorageProvider.GCP
+        )
+            continue;
         if (!process.env[`${storageType}_STORAGE_BUCKET`])
             errors.push(`${storageType}_STORAGE_BUCKET isn't configured`);
         if (!process.env[`${storageType}_STORAGE_SUBPATH`])
@@ -131,9 +141,10 @@ export const downloadFile = async (
 
                 readStream.pipe(writeStream);
             });
-        } finally {
-            if (!readStream.destroyed) readStream.destroy();
-            if (!writeStream.destroyed) writeStream.destroy();
+        } catch (e) {
+            writeStream.end();
+            await rm(dest);
+            throw e;
         }
     } catch (e) {
         logger.error(`Services.Storage.GCP.downloadFile failed : ${e}`);
@@ -164,12 +175,13 @@ export const downloadFolder = async (
         const files: FileInfoExt[] = [];
         for (const file of cloudFiles) {
             files.push({
-                path: file.name,
+                fullPath: file.name,
+                path: file.name.substring(source.length),
             });
         }
 
         for (const file of files) {
-            const [metadata] = await bucket.file(file.path).getMetadata();
+            const [metadata] = await bucket.file(file.fullPath).getMetadata();
             file.size = Number(metadata.size ?? 0);
         }
 
@@ -183,11 +195,9 @@ export const downloadFolder = async (
         const promises: Promise<void>[] = [];
 
         for (const file of files) {
-            const filename = path
-                .join(dest, file.path.substring(source.length))
-                .replaceAll('\\', '/');
+            const filename = path.join(dest, file.path).replaceAll('\\', '/');
 
-            const bucketFile = bucket.file(file.path);
+            const bucketFile = bucket.file(file.fullPath);
 
             const readStream = bucketFile.createReadStream();
             const writeStream = createWriteStream(filename);
@@ -206,10 +216,13 @@ export const downloadFolder = async (
                 });
 
                 readStream.pipe(writeStream);
-            }).finally(() => {
+            });
+            promise.catch(() => {
+                writeStream.end();
+                rmSync(filename);
+            });
+            promise.finally(() => {
                 promises.splice(promises.indexOf(promise), 1);
-                if (!readStream.destroyed) readStream.destroy();
-                if (!writeStream.destroyed) writeStream.destroy();
             });
             promises.push(promise);
 
@@ -275,9 +288,10 @@ export const uploadFile = async (
 
                 readStream.pipe(writeStream);
             });
-        } finally {
-            if (!readStream.destroyed) readStream.destroy();
-            if (!writeStream.destroyed) writeStream.destroy();
+        } catch (e) {
+            writeStream.end();
+            await file.delete().catch(() => {});
+            throw e;
         }
     } catch (e) {
         logger.error(`Services.Storage.GCP.uploadFile failed : ${e}`);
@@ -328,9 +342,10 @@ export const uploadBuffer = async (
 
                 readStream.pipe(writeStream);
             });
-        } finally {
-            if (!readStream.destroyed) readStream.destroy();
-            if (!writeStream.destroyed) writeStream.destroy();
+        } catch (e) {
+            writeStream.end();
+            await file.delete().catch(() => {});
+            throw e;
         }
     } catch (e) {
         logger.error(`Services.Storage.GCP.uploadFile failed : ${e}`);
@@ -357,7 +372,7 @@ export const uploadFolder = async (
         throw new InvalidBucketError(process.env.STORAGE_BUCKET!);
 
     for (const file of files) {
-        const stats = await stat(file.path);
+        const stats = await stat(file.fullPath);
         file.size = stats.size;
     }
 
@@ -373,16 +388,12 @@ export const uploadFolder = async (
 
         for (const file of files) {
             const filename = path
-                .join(
-                    storageConfig.subPath,
-                    dest,
-                    file.path.substring(source.length),
-                )
+                .join(storageConfig.subPath, dest, file.path)
                 .replaceAll('\\', '/');
 
             const bucketFile = bucket.file(filename);
 
-            const readStream = createReadStream(source);
+            const readStream = createReadStream(file.fullPath);
             const writeStream = bucketFile.createWriteStream({
                 contentType: 'application/octet-stream',
             });
@@ -401,10 +412,13 @@ export const uploadFolder = async (
                 });
 
                 readStream.pipe(writeStream);
-            }).finally(() => {
+            });
+            promise.catch(() => {
+                writeStream.end();
+                bucketFile.delete().catch(() => {});
+            });
+            promise.finally(() => {
                 promises.splice(promises.indexOf(promise), 1);
-                if (!readStream.destroyed) readStream.destroy();
-                if (!writeStream.destroyed) writeStream.destroy();
             });
             promises.push(promise);
 

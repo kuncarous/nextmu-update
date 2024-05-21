@@ -10,4 +10,9 @@ export const RedisConnection: redis.RedisOptions = {
             ? { servername: process.env.REDIS_HOST }
             : undefined,
 };
-export const client = new redis.Redis(RedisConnection);
+
+let redisClient: redis.Redis | null = null;
+export const getRedisClient = async () => {
+    if (redisClient != null) return redisClient;
+    return redisClient = new redis.Redis(RedisConnection);
+}

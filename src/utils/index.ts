@@ -74,9 +74,38 @@ export const fileStats = async (filename: string) => {
     }
 };
 
-export const getInputFolder = (uploadId: string, hash: string) =>
-    `${uploadId.toUpperCase()}/${hash.toUpperCase()}/`;
+export const getInputFolder = (
+    uploadId: string,
+    hash: string,
+    concurrentId: string,
+) =>
+    `${uploadId.toUpperCase()}/${hash.toUpperCase()}/${concurrentId.toUpperCase()}`;
 export const getUploadFile = (versionId: string) =>
     `${versionId.toUpperCase()}.zip`;
 export const getOutputFolder = (versionId: string) =>
     `${versionId.toUpperCase()}/`;
+
+export const getMissingRanges = (
+    existingParts: number[],
+    totalCount: number,
+): [number, number][] => {
+    const missingRanges: [number, number][] = [];
+
+    // Sort the existing parts in ascending order.
+    existingParts.sort((a, b) => a - b);
+
+    let start = 0;
+    for (const part of existingParts) {
+        if (part !== start) {
+            missingRanges.push([start, part - 1]);
+        }
+        start = part + 1;
+    }
+
+    // Check for any missing parts at the end.
+    if (start < totalCount) {
+        missingRanges.push([start, totalCount - 1]);
+    }
+
+    return missingRanges;
+};

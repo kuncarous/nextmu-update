@@ -2,8 +2,8 @@ import { StatusCodes } from 'http-status-codes';
 import { ObjectId, WithId } from 'mongodb';
 import path from 'node:path';
 import { logger } from '~/logger';
-import { ChunkInfo__Output } from '~/proto/nextmu/v1/ChunkInfo';
 import { StartUploadVersionResponse__Output } from '~/proto/nextmu/v1/StartUploadVersionResponse';
+import { UploadState } from '~/proto/nextmu/v1/UploadState';
 import { UploadVersionChunkResponse__Output } from '~/proto/nextmu/v1/UploadVersionChunkResponse';
 import { VersionState } from '~/proto/nextmu/v1/VersionState';
 import { VersionType } from '~/proto/nextmu/v1/VersionType';
@@ -21,13 +21,14 @@ import type {
     OperatingSystems,
     TextureFormat,
 } from '~/types/api/v1';
-import { getInputFolder } from '~/utils';
+import { getInputFolder, getMissingRanges } from '~/utils';
 import { UpdateServiceJobType, UpdatesQueue } from '../bullmq';
 import { getMongoClient } from '../mongodb/client';
 import { IMDBUploadChunk } from '../mongodb/schemas/updates/chunks';
 import type { IMDBUpdateFile } from '../mongodb/schemas/updates/files';
 import { IMDBUpload } from '../mongodb/schemas/updates/uploads';
 import type { IMDBVersion } from '../mongodb/schemas/updates/versions';
+import { setUploadState } from '../mongodb/update';
 import { deleteFolder, uploadBuffer } from '../storage';
 import { StorageType } from '../storage/enums';
 
@@ -149,6 +150,7 @@ export const createVersion = async (type: VersionType, description: string) => {
             id: result._id,
             version: result.version,
         };
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
     } catch (error) {
         throw new ResponseError(
             StatusCodes.SERVICE_UNAVAILABLE,
@@ -327,6 +329,107 @@ export const getVersion = async (versionId: ObjectId) => {
     }
 
     return version;
+};
+
+export const getUpload = async (versionId: ObjectId) => {
+    const client = await getMongoClient();
+    if (!client) {
+        throw new ResponseError(
+            StatusCodes.SERVICE_UNAVAILABLE,
+            'service unavailable.',
+            `service unavailable, failed to connect mongodb.`,
+        );
+    }
+
+    const uploadsColl = client.db('updates').collection<IMDBUpload>('uploads');
+    const chunksColl = client
+        .db('updates')
+        .collection<IMDBUploadChunk>('chunks');
+
+    const upload = await uploadsColl.findOne({
+        versionId,
+    });
+    if (upload == null) return null;
+
+    const chunks = await chunksColl
+        .find(
+            {
+                uploadId: upload._id,
+            },
+            {
+                projection: {
+                    offset: 1,
+                },
+            },
+        )
+        .toArray();
+
+    return {
+        ...upload,
+        missingRanges: getMissingRanges(
+            chunks.map((c) => c.offset),
+            upload.chunksCount,
+        ),
+    };
+};
+
+export const getUploads = async (versionIds: ObjectId[]) => {
+    if (versionIds.length === 0) return [];
+
+    const client = await getMongoClient();
+    if (!client) {
+        throw new ResponseError(
+            StatusCodes.SERVICE_UNAVAILABLE,
+            'service unavailable.',
+            `service unavailable, failed to connect mongodb.`,
+        );
+    }
+
+    const uploadsColl = client.db('updates').collection<IMDBUpload>('uploads');
+    const chunksColl = client
+        .db('updates')
+        .collection<IMDBUploadChunk>('chunks');
+
+    const uploads = await uploadsColl
+        .find({
+            versionId: {
+                $in: versionIds,
+            },
+        })
+        .toArray();
+    if (uploads.length === 0) return [];
+
+    const chunks = (
+        await chunksColl
+            .find(
+                {
+                    uploadId: {
+                        $in: uploads.map((u) => u._id),
+                    },
+                },
+                {
+                    projection: {
+                        uploadId: 1,
+                        offset: 1,
+                    },
+                },
+            )
+            .toArray()
+    ).reduce((map, current) => {
+        const id = current._id.toHexString();
+        const c = map.get(id);
+        if (c != null) c.push(current.offset);
+        else map.set(id, [current.offset]);
+        return map;
+    }, new Map<string, number[]>());
+
+    return uploads.map((u) => ({
+        ...u,
+        missingRanges: getMissingRanges(
+            chunks.get(u._id.toHexString()) ?? [],
+            u.chunksCount,
+        ),
+    }));
 };
 
 export const processUpdateFile = async (
@@ -570,6 +673,7 @@ export const startUploadVersion = async (
         const currentDate = new Date();
         const uploadId = new ObjectId();
         const concurrentId = new ObjectId();
+        const chunksCount = Math.ceil(fileSize / chunkSize);
         const result = await uploadsColl.findOneAndUpdate(
             {
                 versionId: id,
@@ -596,11 +700,27 @@ export const startUploadVersion = async (
                                 else: concurrentId,
                             },
                         },
+                        state: {
+                            $cond: {
+                                if: {
+                                    $and: [
+                                        {
+                                            $eq: [hash, '$hash'],
+                                        },
+                                        {
+                                            $eq: [chunkSize, '$chunkSize'],
+                                        },
+                                    ],
+                                },
+                                then: '$state',
+                                else: UploadState.NONE,
+                            },
+                        },
                         hash,
                         type,
                         fileSize,
                         chunkSize,
-                        chunksCount: Math.ceil(fileSize / chunkSize),
+                        chunksCount,
                         createdAt: {
                             $ifNull: ['$createdAt', currentDate],
                         },
@@ -633,7 +753,12 @@ export const startUploadVersion = async (
             return {
                 uploadId: uploadId.toHexString(),
                 concurrentId: concurrentId.toHexString(),
-                existingChunks: [],
+                missingRanges: [
+                    {
+                        start: 0,
+                        end: chunksCount - 1,
+                    },
+                ],
             };
         }
 
@@ -665,21 +790,10 @@ export const startUploadVersion = async (
         return {
             uploadId: (result?._id ?? uploadId).toHexString(),
             concurrentId: (result?.concurrentId ?? concurrentId).toHexString(),
-            existingChunks: chunks
-                .sort((a, b) => a.offset - b.offset)
-                .map((c) => ({ offset: c.offset, size: 1 }))
-                .reduce<ChunkInfo__Output[]>((previousValue, currentValue) => {
-                    if (previousValue.length === 0) return [currentValue];
-                    const lastValue = previousValue[previousValue.length - 1];
-                    if (
-                        lastValue.offset + lastValue.size ===
-                        currentValue.offset
-                    ) {
-                        ++lastValue.size;
-                        return previousValue;
-                    }
-                    return [...previousValue, currentValue];
-                }, []),
+            missingRanges: getMissingRanges(
+                chunks.map((c) => c.offset),
+                chunksCount,
+            ).map(([start, end]) => ({ start, end })),
         };
     } catch (error) {
         logger.error(`[ERROR] startUploadVersion failed : ${error}`);
@@ -755,19 +869,35 @@ export const uploadVersionChunk = async (
             data,
             path
                 .join(
-                    getInputFolder(uploadId.toHexString(), upload.hash),
+                    getInputFolder(
+                        uploadId.toHexString(),
+                        upload.hash,
+                        concurrentId.toHexString(),
+                    ),
                     `${offset.toString().padStart(8, '0')}.data`,
                 )
                 .replaceAll('\\', '/'),
         );
 
-        await chunksColl.insertOne({
-            uploadId,
-            concurrentId,
-            offset,
-            size: data.length,
-            createdAt: new Date(),
-        });
+        await chunksColl.updateOne(
+            {
+                uploadId,
+                concurrentId,
+                offset,
+            },
+            {
+                $setOnInsert: {
+                    uploadId,
+                    concurrentId,
+                    offset,
+                    size: data.length,
+                    createdAt: new Date(),
+                },
+            },
+            {
+                upsert: true,
+            },
+        );
 
         const chunksCount = await chunksColl.countDocuments({
             uploadId,
@@ -775,6 +905,12 @@ export const uploadVersionChunk = async (
         });
 
         if (upload.chunksCount === chunksCount) {
+            await setUploadState(
+                uploadId,
+                concurrentId,
+                UploadState.PENDING,
+                UploadState.NONE,
+            );
             await processUpdateFile(
                 upload.versionId.toHexString(),
                 uploadId.toHexString(),

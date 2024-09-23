@@ -12,13 +12,19 @@ import fs, {
 } from 'node:fs';
 import { mkdir, rm, stat } from 'node:fs/promises';
 import path, { resolve } from 'node:path';
-import { v4 as uuidv4 } from 'uuid-mongodb';
+import MUUID from 'uuid-mongodb';
 import zlib from 'zlib';
+import { UploadState } from '~/proto/nextmu/v1/UploadState';
 import { VersionState } from '~/proto/nextmu/v1/VersionState';
 import { getMongoClient } from '~/services/mongodb/client';
 import { IMDBUpdateFile } from '~/services/mongodb/schemas/updates/files';
 import { IMDBUpload } from '~/services/mongodb/schemas/updates/uploads';
 import { IMDBVersion } from '~/services/mongodb/schemas/updates/versions';
+import {
+    deleteUploadChunks,
+    setUploadState,
+    setVersionState,
+} from '~/services/mongodb/update';
 import {
     deleteFolder,
     downloadFile,
@@ -31,6 +37,7 @@ import { fixedProgress } from '~/shared';
 import {
     UpdateTypeLookup,
     incomingFolders,
+    incomingFoldersRegexes,
     incomingUpdatesPath,
     processedUpdatesPath,
 } from '~/shared/update';
@@ -40,6 +47,7 @@ import {
     getInputFolder,
     getUploadFile,
 } from '~/utils';
+import { calculateFileHash } from '~/utils/hash';
 import { RedisConnection } from '../../redis';
 import {
     IProcessPublishVersionJobData,
@@ -84,9 +92,6 @@ const deleteDirectory = async (path: string) => {
 };
 
 interface FileInfoExt extends FileInfo {
-    // Before process
-    path: string;
-
     // After process info
     filename?: string;
     extension?: string;
@@ -98,7 +103,8 @@ interface FileInfoExt extends FileInfo {
 async function makeDirectory(directory: string, recursive: boolean = false) {
     try {
         await fsAsync.mkdir(directory, { recursive });
-    } catch (e) {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    } catch (_) {
         /* empty */
     }
 }
@@ -149,6 +155,8 @@ const processUploadVersion = async (
     data: IProcessUploadVersionJobData,
 ) => {
     const { versionId, uploadId, concurrentId } = data;
+    const _uploadId = new ObjectId(uploadId);
+    const _concurrentId = new ObjectId(concurrentId);
 
     const client = await getMongoClient();
     if (!client) {
@@ -158,18 +166,21 @@ const processUploadVersion = async (
     const uploadsColl = client.db('updates').collection<IMDBUpload>('uploads');
 
     const upload = await uploadsColl.findOne({
-        _id: new ObjectId(uploadId),
+        _id: _uploadId,
         concurrentId: new ObjectId(concurrentId),
     });
-    if (
-        upload == null ||
-        upload.versionId.equals(versionId) == false ||
-        upload.concurrentId.equals(concurrentId) == false
-    ) {
+    if (upload == null || upload.versionId.equals(versionId) == false) {
         return;
     }
 
-    const uploadPath = `uploads/${versionId.toUpperCase()}-${uploadId.toUpperCase()}/`;
+    await setUploadState(
+        _uploadId,
+        _concurrentId,
+        UploadState.PROCESSING,
+        UploadState.PENDING,
+    );
+
+    const uploadPath = `uploads/${versionId.toUpperCase()}-${uploadId.toUpperCase()}-${concurrentId.toUpperCase()}/`;
     const incomingPath = path.join(incomingUpdatesPath, uploadPath);
     const processedPath = path.join(processedUpdatesPath, uploadPath);
 
@@ -183,7 +194,7 @@ const processUploadVersion = async (
         const processProgress = [50, 90];
         const uploadProgress = [90, 100];
 
-        const filesPrefix = getInputFolder(uploadId, upload.hash);
+        const filesPrefix = getInputFolder(uploadId, upload.hash, concurrentId);
         await downloadFolder(StorageType.Input, filesPrefix, incomingPath, {
             onProgress: (progress) =>
                 job.updateProgress(
@@ -240,7 +251,11 @@ const processUploadVersion = async (
             throw e;
         }
 
-        await deleteFolder(StorageType.Input, filesPrefix);
+        const calculatedHash = await calculateFileHash(filename);
+        if (calculatedHash !== upload.hash) {
+            return;
+        }
+
         await uploadFile(
             StorageType.Input,
             filename,
@@ -256,10 +271,26 @@ const processUploadVersion = async (
                     ),
             },
         );
+        await setUploadState(
+            _uploadId,
+            _concurrentId,
+            UploadState.READY,
+            UploadState.PROCESSING,
+        );
+        await deleteFolder(StorageType.Input, filesPrefix);
+        await deleteUploadChunks(_uploadId);
     } finally {
         await deleteDirectory(incomingPath);
         await deleteDirectory(processedPath);
     }
+};
+
+const matchRegexes = (path: string, regexes: RegExp[]) => {
+    for (const regex of regexes) {
+        const match = path.match(regex);
+        if (match) return match[1];
+    }
+    return null;
 };
 
 const processPublishVersion = async (
@@ -267,6 +298,7 @@ const processPublishVersion = async (
     data: IProcessPublishVersionJobData,
 ) => {
     const { versionId } = data;
+    const _versionId = new ObjectId(versionId);
     const uploadPath = `publish/${versionId.toUpperCase()}/`;
     const incomingPath = path.join(incomingUpdatesPath, uploadPath);
     const decompressPath = path.join(
@@ -275,6 +307,28 @@ const processPublishVersion = async (
         'decompressed',
     );
     const processedPath = path.join(processedUpdatesPath, uploadPath);
+
+    const client = await getMongoClient();
+    if (!client) {
+        throw new Error(`getMongoClient failed`);
+    }
+
+    const versionsColl = client
+        .db('updates')
+        .collection<IMDBVersion>('versions');
+
+    const version = await versionsColl.findOne({
+        _id: _versionId,
+    });
+    if (version == null || version.state === VersionState.READY) {
+        return;
+    }
+
+    await setVersionState(
+        _versionId,
+        VersionState.PROCESSING,
+        VersionState.PENDING,
+    );
 
     await deleteDirectory(incomingPath);
     await deleteDirectory(processedPath);
@@ -312,11 +366,21 @@ const processPublishVersion = async (
         let processedCount = 0;
         let reportCounter = 0;
 
-        for (let n = 0; n < incomingFolders.length; ++n) {
-            filesList[n] = await enumerateFiles(
-                path.join(decompressPath, incomingFolders[n]),
-            );
-            filesCount += filesList[n].length;
+        // List Files
+        {
+            const availableFiles = await enumerateFiles(decompressPath);
+
+            for (let n = 0; n < incomingFolders.length; ++n)
+                filesList[n] = [];
+    
+            for (const file of availableFiles) {
+                for (let n = incomingFolders.length - 1; n >= 0; --n) {
+                    const match = matchRegexes(file.path, incomingFoldersRegexes[n]);
+                    if (!match) continue;
+                    filesList[n].push({ ...file, filename: match });
+                    ++filesCount;
+                }
+            }
         }
 
         if (filesCount === 0) {
@@ -339,7 +403,7 @@ const processPublishVersion = async (
 
                 const compressedBuffer = await zlibDeflateAsync(fileBuffer);
                 file.crc32 = Buffer.from(fileCrc32).toString('hex');
-                file.filename = (uuidv4() + `_${file.crc32}`).toUpperCase();
+                file.filename = (MUUID.v4() + `_${file.crc32}`).toUpperCase();
                 file.extension = '.eupdz';
                 file.fileSize = fileBuffer.length;
                 file.packedSize = compressedBuffer.length;
@@ -416,21 +480,11 @@ const processPublishVersion = async (
                 session,
             });
 
-            const versionsColl = client
-                .db('updates')
-                .collection<IMDBVersion>('versions');
-            await versionsColl.updateOne(
-                {
-                    _id: versionOid,
-                },
-                {
-                    $set: {
-                        state: VersionState.READY,
-                    },
-                },
-                {
-                    session,
-                },
+            await setVersionState(
+                _versionId,
+                VersionState.READY,
+                VersionState.PROCESSING,
+                session,
             );
 
             await session.commitTransaction();

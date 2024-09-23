@@ -3,18 +3,21 @@ import * as protoLoader from '@grpc/proto-loader';
 import { ObjectId, WithId } from 'mongodb';
 import { z } from 'zod';
 import type { UpdateServiceHandlers } from '~/proto/nextmu/v1/UpdateService';
+import { Upload } from '~/proto/nextmu/v1/Upload';
 import type { Version } from '~/proto/nextmu/v1/Version';
 import { VersionType } from '~/proto/nextmu/v1/VersionType';
 import type { ProtoGrpcType } from '~/proto/update';
 import {
     createVersion,
     editVersion,
+    getUploads,
     getVersion,
     getVersions,
     processVersion,
     startUploadVersion,
     uploadVersionChunk,
 } from '~/services/api';
+import { IMDBUpload } from '~/services/mongodb/schemas/updates/uploads';
 import { IMDBVersion } from '~/services/mongodb/schemas/updates/versions';
 import { getVersionAsString, toTimestamp } from '~/utils';
 import { retrieveAuthMetadata, validateRoles } from '../middlewares/auth';
@@ -56,6 +59,15 @@ const ZEditVersionRequest = z.object({
         .refine((v) => ObjectId.isValid(v))
         .transform((v) => new ObjectId(v)),
     description: z.string().min(1).max(256),
+});
+
+const ZFetchUploadsRequest = z.object({
+    ids: z.array(
+        z
+            .string()
+            .refine((v) => ObjectId.isValid(v))
+            .transform((v) => new ObjectId(v)),
+    ),
 });
 
 const ZStartUploadVersionRequest = z.object({
@@ -113,6 +125,25 @@ const parseVersion = (
         filesCount: version.filesCount,
         createdAt: toTimestamp(version.createdAt),
         updatedAt: toTimestamp(version.updatedAt),
+    };
+};
+
+const parseUpload = (
+    upload: WithId<IMDBUpload> & { missingRanges: [number, number][] },
+): Upload => {
+    return {
+        id: upload._id.toHexString(),
+        versionId: upload.versionId.toHexString(),
+        concurrentId: upload.concurrentId.toHexString(),
+        hash: upload.hash,
+        fileSize: upload.fileSize,
+        chunkSize: upload.chunkSize,
+        chunksCount: upload.chunksCount,
+        state: upload.state,
+        missingRanges: upload.missingRanges.map((m) => ({
+            start: m[0],
+            end: m[1],
+        })),
     };
 };
 
@@ -197,10 +228,10 @@ export const updateServiceServer: UpdateServiceHandlers = {
 
         try {
             const { id } = parsed.data;
-            const result = await getVersion(id);
+            const version = await getVersion(id);
 
             callback(null, {
-                version: parseVersion(result),
+                version: parseVersion(version),
             });
         } catch (error) {
             handlegRpcError(
@@ -237,6 +268,37 @@ export const updateServiceServer: UpdateServiceHandlers = {
         } catch (error) {
             handlegRpcError(
                 'UpdateServiceServer.ListVersions',
+                call,
+                callback,
+                error,
+            );
+        }
+    },
+    FetchUploads: async (call, callback) => {
+        const [auth, error] = await retrieveAuthMetadata(call);
+        if (error !== null) return callback(error);
+
+        const roles_error = await ViewRoleValidator(auth!);
+        if (error != null) return callback(roles_error);
+
+        const parsed = ZFetchUploadsRequest.safeParse(call.request);
+        if (parsed.success == false) {
+            return call.emit<grpc.ServiceError>('error', {
+                code: grpc.status.INVALID_ARGUMENT,
+                details: parsed.error.format()._errors.join('\n'),
+            });
+        }
+
+        try {
+            const { ids } = parsed.data;
+            const uploads = await getUploads(ids);
+
+            callback(null, {
+                uploads: uploads.map((u) => parseUpload(u)),
+            });
+        } catch (error) {
+            handlegRpcError(
+                'UpdateServiceServer.FetchUploads',
                 call,
                 callback,
                 error,

@@ -84,3 +84,26 @@ export const incomingFolders = [
     'android',
     'ios',
 ];
+
+export const incomingFoldersRegexes = [
+    [/^(?!\.nextmu\/)(.*)$/],
+
+    [/^.nextmu[/\\]desktop[/\\](.*)$/],
+    [/^.nextmu[/\\]mobile[/\\](.*)$/],
+
+    [/^.nextmu[/\\]uncompressed[/\\](.*)$/],
+    [/^.nextmu[/\\]bc3[/\\](.*)$/],
+    [/^.nextmu[/\\]bc7[/\\](.*)$/],
+    [/^.nextmu[/\\]etc2[/\\](.*)$/],
+    [/^.nextmu[/\\]astc[/\\](.*)$/],
+
+    [
+        /^.nextmu[/\\]windows[/\\](.*)$/,
+        /^(?!\.nextmu[/\\])(.*\.(exe|dll))$/,
+        /^(?!\.nextmu[/\\])((?:x64|x86)[/\\].*)$/,
+    ],
+    [/^.nextmu[/\\]linux[/\\](.*)$/],
+    [/^.nextmu[/\\]macos[/\\](.*)$/],
+    [/^.nextmu[/\\]android[/\\](.*)$/],
+    [/^.nextmu[/\\]ios[/\\](.*)$/],
+];

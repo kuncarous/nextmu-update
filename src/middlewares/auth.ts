@@ -16,6 +16,7 @@ export const getAuthorizationServer = async () => {
         }
 
         return await oidc.processDiscoveryResponse(url, response);
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
     } catch (error) {
         return null;
     }
